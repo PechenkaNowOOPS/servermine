@@ -45,6 +45,7 @@ public final class MenuManager {
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingFounding> pendingFounding = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingPromotion> pendingPromotions = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingClaim> pendingClaims = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<java.util.UUID, PendingMemberKick> pendingMemberKicks = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, java.util.UUID> cityIds = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, CitySnapshot> cityViews = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, List<ChunkPosition>> purchaseTargets = new java.util.HashMap<>();
@@ -62,6 +63,7 @@ public final class MenuManager {
         pendingFounding.remove(player.getUniqueId());
         pendingPromotions.remove(player.getUniqueId());
         pendingClaims.remove(player.getUniqueId());
+        pendingMemberKicks.remove(player.getUniqueId());
         cityIds.remove(player.getUniqueId());
         cityViews.remove(player.getUniqueId());
         purchaseTargets.remove(player.getUniqueId());
@@ -123,13 +125,13 @@ public final class MenuManager {
         // Explicit admin preview only; never publishes fixture data through CitiesService.
         requests.remove(player.getUniqueId());
         CitySnapshot city = new CitySnapshot("Камнедолбинск · макет", CityStage.CITY, 17, 24580, 0,
-            List.of(new CitySnapshot.ResidentEntry("PechenkaNow", "Правитель"),
-                    new CitySnapshot.ResidentEntry("Neronius", "Заместитель"),
-                    new CitySnapshot.ResidentEntry("Artemis", "Казначей"),
-                    new CitySnapshot.ResidentEntry("Luna", "Строитель"),
-                    new CitySnapshot.ResidentEntry("Kray", "Житель"),
-                    new CitySnapshot.ResidentEntry("Velmira", "Житель"),
-                    new CitySnapshot.ResidentEntry("Witch", "Временный заместитель")));
+            List.of(new CitySnapshot.ResidentEntry(UUID.randomUUID(), "PechenkaNow", "Правитель"),
+                    new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Neronius", "Заместитель"),
+                    new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Artemis", "Казначей"),
+                    new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Luna", "Строитель"),
+                    new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Kray", "Житель"),
+                    new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Velmira", "Житель"),
+                    new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Witch", "Временный заместитель")));
         cityIds.remove(player.getUniqueId());
         cityViews.remove(player.getUniqueId());
         purchaseTargets.remove(player.getUniqueId());
@@ -139,7 +141,15 @@ public final class MenuManager {
 
     private CitySnapshot snapshot(CityView city) {
         return new CitySnapshot(city.name(), city.stage(), city.chunks().size(), city.treasury(), city.revision(),
-            city.residents().stream().map(r -> new CitySnapshot.ResidentEntry(r.name(), r.role())).toList());
+            city.residents().stream().map(r -> new CitySnapshot.ResidentEntry(r.playerId(), r.name(), roleName(r.role()))).toList());
+    }
+
+    private String roleName(String role) {
+        return switch (role) {
+            case "RULER" -> "Правитель";
+            case "RESIDENT" -> "Житель";
+            default -> role;
+        };
     }
 
     private void show(Player player, MenuType type, CitySnapshot city, boolean preview, java.util.UUID cityId) {
@@ -178,6 +188,7 @@ public final class MenuManager {
             case UPGRADES -> renderUpgrades(inv, city);
             case TREASURY -> renderTreasury(inv, city);
             case RESIDENTS -> renderResidents(inv, city);
+            case MEMBER_KICK_CONFIRM -> renderMemberKickConfirm(inv, playerId, preview);
             case MANAGEMENT -> renderManagement(inv, city);
             case DIPLOMACY -> renderDiplomacy(inv, city);
             case MARKET -> { inv.setItem(22, button(Material.CHEST, "Городской рынок", "Модуль подготовлен к разработке.")); inv.setItem(45, back()); }
@@ -473,9 +484,19 @@ public final class MenuManager {
         int i = 0;
         for (CitySnapshot.ResidentEntry resident : c.residents()) {
             if (i >= slots.length) break;
-            inv.setItem(slots[i++], button(Material.PLAYER_HEAD, resident.name(), resident.role()));
+            inv.setItem(slots[i++], button(Material.PLAYER_HEAD, resident.name(), resident.role(), "ЛКМ: управление участником"));
         }
-        inv.setItem(40, button(Material.LIME_DYE, "Пригласить игрока", "Будет связано с системой жителей Cities."));
+        inv.setItem(40, button(Material.LIME_DYE, "Пригласить игрока", "Команда: /smcities invite <игрок>"));
+        inv.setItem(41, button(Material.PAPER, "Принять приглашение", "Команда: /smcities accept"));
+        inv.setItem(45, back());
+    }
+
+    private void renderMemberKickConfirm(Inventory inv, UUID playerId, boolean preview) {
+        PendingMemberKick pending = pendingMemberKicks.get(playerId);
+        String name = pending == null ? "Участник" : pending.targetName;
+        inv.setItem(13, button(Material.PLAYER_HEAD, name, "Исключить из города?"));
+        inv.setItem(29, button(Material.REDSTONE_BLOCK, "Исключить", "Участник потеряет доступ к территории."));
+        inv.setItem(33, button(Material.BARRIER, "Отмена", "Вернуться к составу города."));
         inv.setItem(45, back());
     }
 
@@ -526,6 +547,17 @@ public final class MenuManager {
         }
         else if (session.menuType() == MenuType.PURCHASE && rawSlot == 42) target = MenuType.TERRITORY;
         else if (session.menuType() == MenuType.MANAGEMENT && rawSlot == 41) target = MenuType.PROGRESSION;
+        else if (session.menuType() == MenuType.RESIDENTS && residentSlot(rawSlot)) {
+            beginMemberKick(player, session, rawSlot);
+            return;
+        } else if (session.menuType() == MenuType.MEMBER_KICK_CONFIRM && rawSlot == 29) {
+            confirmMemberKick(player);
+            return;
+        } else if (session.menuType() == MenuType.MEMBER_KICK_CONFIRM && rawSlot == 33) {
+            pendingMemberKicks.remove(player.getUniqueId());
+            open(player, MenuType.RESIDENTS);
+            return;
+        }
         if (target != null) {
             if (session.preview()) openPreview(player, target); else open(player, target);
         } else if (session.menuType() == MenuType.FOUNDING && rawSlot == 31) {
@@ -555,9 +587,77 @@ public final class MenuManager {
         } else if (session.menuType() == MenuType.PURCHASE_CONFIRM && rawSlot == 33) {
             pendingClaims.remove(player.getUniqueId());
             open(player, MenuType.PURCHASE);
+        } else if (session.menuType() == MenuType.RESIDENTS && rawSlot == 40) {
+            player.sendMessage(Component.text("Пригласить онлайн-игрока: /smcities invite <игрок>", NamedTextColor.YELLOW));
+        } else if (session.menuType() == MenuType.RESIDENTS && rawSlot == 41) {
+            player.sendMessage(Component.text("Принять приглашение: /smcities accept", NamedTextColor.YELLOW));
         } else {
             player.sendMessage(Component.text("Этот раздел пока доступен только для просмотра.", NamedTextColor.YELLOW));
         }
+    }
+
+    private boolean residentSlot(int rawSlot) {
+        return rawSlot == 10 || rawSlot == 11 || rawSlot == 12 || rawSlot == 13 || rawSlot == 14
+                || rawSlot == 15 || rawSlot == 16 || rawSlot == 19 || rawSlot == 20 || rawSlot == 21
+                || rawSlot == 22 || rawSlot == 23 || rawSlot == 24 || rawSlot == 25;
+    }
+
+    private void beginMemberKick(Player player, MenuSession session, int rawSlot) {
+        CitySnapshot current = cityViews.get(player.getUniqueId());
+        if (session.preview() || current == null) {
+            player.sendMessage(Component.text("Управление составом недоступно в макете.", NamedTextColor.YELLOW));
+            return;
+        }
+        int[] slots = {10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25};
+        int index = -1;
+        for (int i = 0; i < slots.length; i++) if (slots[i] == rawSlot) { index = i; break; }
+        if (index < 0 || index >= current.residents().size()) return;
+        CitySnapshot.ResidentEntry target = current.residents().get(index);
+        if (target.playerId().equals(player.getUniqueId())) {
+            player.sendMessage(Component.text("Чтобы покинуть город, используйте /smcities leave.", NamedTextColor.YELLOW));
+            return;
+        }
+        if (target.role().equals("Правитель")) {
+            player.sendMessage(Component.text("Нельзя исключить правителя города.", NamedTextColor.RED));
+            return;
+        }
+        pendingMemberKicks.put(player.getUniqueId(), new PendingMemberKick(target.playerId(), target.name(), session.cityRevision()));
+        open(player, MenuType.MEMBER_KICK_CONFIRM);
+    }
+
+    private void confirmMemberKick(Player player) {
+        PendingMemberKick pending = pendingMemberKicks.remove(player.getUniqueId());
+        var membership = cities.membershipService().orElse(null);
+        if (pending == null || membership == null || !membership.isReady()) {
+            player.sendMessage(Component.text("Управление составом сейчас недоступно.", NamedTextColor.RED));
+            return;
+        }
+        player.closeInventory();
+        membership.kick(player.getUniqueId(), pending.targetId, pending.revision).whenComplete((result, error) -> {
+            if (!plugin.isEnabled()) return;
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!player.isOnline()) return;
+                if (error != null || result == null) {
+                    player.sendMessage(Component.text("Не удалось исключить участника.", NamedTextColor.RED));
+                    return;
+                }
+                switch (result.code()) {
+                    case KICKED -> {
+                        player.sendMessage(Component.text(pending.targetName + " исключён из города.", NamedTextColor.GREEN));
+                        Player target = Bukkit.getPlayer(pending.targetId);
+                        if (target != null) target.sendMessage(Component.text("Вас исключили из города "
+                                + result.city().map(CityView::name).orElse("") + ".", NamedTextColor.RED));
+                        open(player, MenuType.RESIDENTS);
+                    }
+                    case PERMISSION_DENIED -> player.sendMessage(Component.text("Исключать участников может только правитель.", NamedTextColor.RED));
+                    case STALE_CITY -> player.sendMessage(Component.text("Состав изменился. Откройте список жителей и попробуйте снова.", NamedTextColor.YELLOW));
+                    case TARGET_NOT_IN_CITY -> player.sendMessage(Component.text("Этот игрок больше не состоит в городе.", NamedTextColor.YELLOW));
+                    case CANNOT_KICK_RULER -> player.sendMessage(Component.text("Нельзя исключить правителя города.", NamedTextColor.RED));
+                    case NO_CITY -> player.sendMessage(Component.text("Вы не состоите в городе.", NamedTextColor.RED));
+                    default -> player.sendMessage(Component.text("Не удалось исключить участника.", NamedTextColor.RED));
+                }
+            });
+        });
     }
 
     private void openPurchaseTargets(Player player) {
@@ -693,4 +793,5 @@ public final class MenuManager {
     private record PendingPromotion(UUID operationId, UUID cityId, CityStage expectedStage, long revision) { }
 
     private record PendingClaim(UUID operationId, UUID cityId, ChunkPosition target, long revision) { }
+    private record PendingMemberKick(UUID targetId, String targetName, long revision) { }
 }

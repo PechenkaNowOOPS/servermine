@@ -1,6 +1,7 @@
 package ru.servermine.cities.gui;
 
 import java.util.List;
+import java.util.UUID;
 import ru.servermine.cities.api.CityStage;
 
 public record CitySnapshot(
@@ -20,5 +21,5 @@ public record CitySnapshot(
         return territory >= territoryLimit();
     }
 
-    public record ResidentEntry(String name, String role) {}
+    public record ResidentEntry(UUID playerId, String name, String role) {}
 }

@@ -28,6 +28,8 @@ public interface CityRepository {
 
     CompletionStage<CityMembershipResult> acceptCityInvite(UUID playerId, String playerName);
 
+    CompletionStage<CityMembershipResult> kickCityMember(UUID actorId, UUID targetId, long expectedRevision);
+
     CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft);
 
     CompletionStage<CityFoundationResult> found(CityFoundationDraft draft);

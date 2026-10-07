@@ -8,6 +8,7 @@ public enum MenuType {
     UPGRADES('\uE004', "Улучшения"),
     TREASURY('\uE005', "Казна"),
     RESIDENTS('\uE006', "Жители"),
+    MEMBER_KICK_CONFIRM('\u0000', "Исключение участника"),
     MANAGEMENT('\uE007', "Управление"),
     DIPLOMACY('\uE008', "Дипломатия"),
     MARKET('\u0000', "Рынок"),

@@ -431,6 +431,82 @@ public final class SqliteCityRepository implements CityRepository {
         }
     }
 
+    @Override
+    public CompletionStage<CityMembershipResult> kickCityMember(UUID actorId, UUID targetId, long expectedRevision) {
+        return async(() -> kickCityMemberTransaction(actorId, targetId, expectedRevision));
+    }
+
+    private CityMembershipResult kickCityMemberTransaction(UUID actorId, UUID targetId, long expectedRevision)
+            throws SQLException {
+        if (actorId.equals(targetId)) return membershipResult(CityMembershipCode.SELF_TARGET);
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                UUID cityId = null;
+                String actorRole = null;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT city_uuid, role_id FROM city_members WHERE player_uuid = ?")) {
+                    query.setString(1, actorId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next()) {
+                            cityId = UUID.fromString(result.getString("city_uuid"));
+                            actorRole = result.getString("role_id");
+                        }
+                    }
+                }
+                if (cityId == null) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.NO_CITY);
+                }
+                if (!"RULER".equals(actorRole)) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.PERMISSION_DENIED);
+                }
+                String targetRole = null;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT role_id FROM city_members WHERE city_uuid = ? AND player_uuid = ?")) {
+                    query.setString(1, cityId.toString());
+                    query.setString(2, targetId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next()) targetRole = result.getString("role_id");
+                    }
+                }
+                if (targetRole == null) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.TARGET_NOT_IN_CITY);
+                }
+                if ("RULER".equals(targetRole)) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.CANNOT_KICK_RULER);
+                }
+                CityView current = readCity(connection, cityId).orElseThrow(
+                        () -> new SQLException("City disappeared while removing a member"));
+                if (current.revision() != expectedRevision) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.STALE_CITY);
+                }
+                try (PreparedStatement delete = connection.prepareStatement(
+                        "DELETE FROM city_members WHERE city_uuid = ? AND player_uuid = ?")) {
+                    delete.setString(1, cityId.toString());
+                    delete.setString(2, targetId.toString());
+                    if (delete.executeUpdate() != 1) throw new SQLException("Membership changed during removal");
+                }
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE cities SET revision = revision + 1 WHERE city_uuid = ?")) {
+                    update.setString(1, cityId.toString());
+                    if (update.executeUpdate() != 1) throw new SQLException("City disappeared during member removal");
+                }
+                CityView updated = readCity(connection, cityId).orElseThrow(
+                        () -> new SQLException("City disappeared after member removal"));
+                connection.commit();
+                return new CityMembershipResult(CityMembershipCode.KICKED, Optional.of(updated));
+            } catch (SQLException | RuntimeException error) {
+                connection.rollback();
+                throw error;
+            }
+        }
+    }
+
     private CityMembershipResult membershipResult(CityMembershipCode code) {
         return new CityMembershipResult(code, Optional.empty());
     }

@@ -63,6 +63,17 @@ public final class CityMembershipServiceImpl implements CityMembershipService {
         }).exceptionally(error -> new CityMembershipResult(CityMembershipCode.INTERNAL_ERROR, Optional.empty()));
     }
 
+    @Override
+    public CompletionStage<CityMembershipResult> kick(UUID actorId, UUID targetId, long expectedRevision) {
+        Objects.requireNonNull(actorId, "actorId");
+        Objects.requireNonNull(targetId, "targetId");
+        if (!ready) return membershipResult(CityMembershipCode.SERVICE_UNAVAILABLE);
+        return repository.kickCityMember(actorId, targetId, expectedRevision).thenApply(result -> {
+            if (result.code() == CityMembershipCode.KICKED) result.city().ifPresent(cityChanged);
+            return result;
+        }).exceptionally(error -> new CityMembershipResult(CityMembershipCode.INTERNAL_ERROR, Optional.empty()));
+    }
+
     private CompletionStage<CityLeaveResult> completed(CityLeaveCode code) {
         return CompletableFuture.completedFuture(new CityLeaveResult(code, Optional.empty(), Optional.empty()));
     }

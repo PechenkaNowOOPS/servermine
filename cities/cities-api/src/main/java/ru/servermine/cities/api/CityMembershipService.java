@@ -12,4 +12,6 @@ public interface CityMembershipService {
     CompletionStage<CityMembershipResult> invite(UUID inviterId, UUID inviteeId, String inviteeName);
 
     CompletionStage<CityMembershipResult> accept(UUID playerId, String playerName);
+
+    CompletionStage<CityMembershipResult> kick(UUID actorId, UUID targetId, long expectedRevision);
 }

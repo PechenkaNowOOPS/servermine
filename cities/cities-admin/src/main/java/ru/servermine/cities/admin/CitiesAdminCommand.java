@@ -65,6 +65,37 @@ public final class CitiesAdminCommand implements CommandExecutor {
                     }));
             return true;
         }
+        if (args.length > 0 && args[0].equalsIgnoreCase("kick")) {
+            if (args.length != 2) { sender.sendMessage("Использование: /smcities kick <игрок>"); return true; }
+            if (!(sender instanceof Player player)) { sender.sendMessage("Эта команда доступна только игроку."); return true; }
+            Player target = Bukkit.getPlayerExact(args[1]);
+            if (target == null) { player.sendMessage("Игрок должен быть онлайн."); return true; }
+            var membership = cities.membershipService().orElse(null);
+            if (membership == null || !membership.isReady()) { player.sendMessage("Управление составом города временно недоступно."); return true; }
+            cities.cityForPlayer(player.getUniqueId()).whenComplete((city, lookupError) ->
+                    plugin.getServer().getScheduler().runTask(plugin, () -> {
+                        if (!player.isOnline()) return;
+                        if (lookupError != null || city == null || city.isEmpty()) { player.sendMessage("Вы не состоите в городе."); return; }
+                        membership.kick(player.getUniqueId(), target.getUniqueId(), city.get().revision()).whenComplete((result, error) ->
+                                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                                    if (!player.isOnline()) return;
+                                    if (error != null || result == null) { player.sendMessage("Не удалось исключить игрока."); return; }
+                                    switch (result.code()) {
+                                        case KICKED -> {
+                                            player.sendMessage(target.getName() + " исключён из города.");
+                                            if (target.isOnline()) target.sendMessage("Вас исключили из города " + city.get().name() + ".");
+                                        }
+                                        case PERMISSION_DENIED -> player.sendMessage("Исключать участников может только правитель.");
+                                        case TARGET_NOT_IN_CITY -> player.sendMessage("Игрок не состоит в вашем городе.");
+                                        case SELF_TARGET -> player.sendMessage("Нельзя исключить себя. Используйте /smcities leave.");
+                                        case CANNOT_KICK_RULER -> player.sendMessage("Нельзя исключить правителя города.");
+                                        case STALE_CITY -> player.sendMessage("Состав изменился. Повторите команду.");
+                                        default -> player.sendMessage("Не удалось исключить игрока.");
+                                    }
+                                }));
+                    }));
+            return true;
+        }
         if (args.length > 0 && args[0].equalsIgnoreCase("leave")) {
             if (args.length != 1) { sender.sendMessage("Использование: /smcities leave"); return true; }
             if (!(sender instanceof Player player)) { sender.sendMessage("Эта команда доступна только игроку."); return true; }
@@ -96,7 +127,7 @@ public final class CitiesAdminCommand implements CommandExecutor {
                     + "; progression ready=" + cities.progressionService().filter(ru.servermine.cities.api.CityProgressionService::isReady).isPresent()
                     + "; territory ready=" + cities.territoryService().filter(ru.servermine.cities.api.CityTerritoryService::isReady).isPresent()
                     + "; members ready=" + cities.membershipService().filter(ru.servermine.cities.api.CityMembershipService::isReady).isPresent());
-            sender.sendMessage("/smcities <givebook|open|preview> <игрок> [menu]; /smcities invite <игрок>; /smcities accept; /smcities leave");
+            sender.sendMessage("/smcities <givebook|open|preview> <игрок> [menu]; /smcities invite <игрок>; /smcities accept; /smcities kick <игрок>; /smcities leave");
             return true;
         }
         String action = args[0].toLowerCase(Locale.ROOT);
