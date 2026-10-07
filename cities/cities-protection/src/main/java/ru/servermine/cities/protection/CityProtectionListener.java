@@ -11,6 +11,12 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.block.BlockFromToEvent;
+import org.bukkit.event.block.BlockIgniteEvent;
+import org.bukkit.event.block.BlockBurnEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
+import org.bukkit.event.block.BlockPistonRetractEvent;
+import org.bukkit.block.BlockFace;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -68,6 +74,46 @@ public final class CityProtectionListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onBlockExplosion(BlockExplodeEvent event) {
         event.blockList().removeIf(block -> index.isClaimed(position(block)));
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPistonExtend(BlockPistonExtendEvent event) {
+        if (pistonTouchesClaim(event.getBlock(), event.getBlocks(), event.getDirection(), false)) event.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPistonRetract(BlockPistonRetractEvent event) {
+        if (pistonTouchesClaim(event.getBlock(), event.getBlocks(), event.getDirection(), true)) event.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onLiquidFlow(BlockFromToEvent event) {
+        if (!index.allowsTransfer(position(event.getBlock()), position(event.getToBlock()))) event.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onFireIgnite(BlockIgniteEvent event) {
+        Block source = event.getIgnitingBlock();
+        if (index.isClaimed(position(event.getBlock()))
+                || (source != null && !index.allowsTransfer(position(source), position(event.getBlock())))) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onBlockBurn(BlockBurnEvent event) {
+        if (index.isClaimed(position(event.getBlock()))) event.setCancelled(true);
+    }
+
+    private boolean pistonTouchesClaim(Block piston, java.util.List<Block> moved, BlockFace direction, boolean retract) {
+        if (index.isClaimed(position(piston))) return true;
+        BlockFace opposite = direction.getOppositeFace();
+        for (Block block : moved) {
+            if (index.isClaimed(position(block))) return true;
+            if (index.isClaimed(position(block.getRelative(direction)))) return true;
+            if (retract && index.isClaimed(position(block.getRelative(opposite)))) return true;
+        }
+        return false;
     }
 
     private boolean deny(Player player, Location location) {

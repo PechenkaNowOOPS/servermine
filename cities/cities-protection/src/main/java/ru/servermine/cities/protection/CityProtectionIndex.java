@@ -28,6 +28,13 @@ public final class CityProtectionIndex {
         return claims.containsKey(chunk);
     }
 
+    public synchronized boolean allowsTransfer(ChunkPosition source, ChunkPosition destination) {
+        Claim from = claims.get(source);
+        Claim to = claims.get(destination);
+        if (from == null || to == null) return from == to;
+        return from.cityId.equals(to.cityId);
+    }
+
     public synchronized int claimCount() { return claims.size(); }
 
     public synchronized boolean canModify(UUID playerId, ChunkPosition chunk) {
