@@ -3,6 +3,7 @@ package ru.servermine.cities.core;
 import ru.servermine.cities.api.CitiesService;
 import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.api.CityFoundingService;
+import ru.servermine.cities.api.CityProgressionService;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -14,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 public final class PersistedCitiesService implements CitiesService {
     private final CityRepository repository;
     private final CityFoundingService foundingService;
+    private final CityProgressionService progressionService;
     private volatile boolean ready = true;
 
     public PersistedCitiesService(CityRepository repository) {
@@ -21,8 +23,14 @@ public final class PersistedCitiesService implements CitiesService {
     }
 
     public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService) {
+        this(repository, foundingService, null);
+    }
+
+    public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService,
+                                  CityProgressionService progressionService) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.foundingService = foundingService;
+        this.progressionService = progressionService;
     }
 
     public String apiVersion() {
@@ -36,6 +44,11 @@ public final class PersistedCitiesService implements CitiesService {
     @Override
     public Optional<CityFoundingService> foundingService() {
         return ready ? Optional.ofNullable(foundingService) : Optional.empty();
+    }
+
+    @Override
+    public Optional<CityProgressionService> progressionService() {
+        return ready ? Optional.ofNullable(progressionService) : Optional.empty();
     }
 
     public void deactivate() {

@@ -11,7 +11,9 @@ public enum MenuType {
     DIPLOMACY('\uE008', "Дипломатия"),
     MARKET('\u0000', "Рынок"),
     FOUNDING('\u0000', "Основание города"),
-    FOUNDING_CONFIRM('\u0000', "Подтверждение основания");
+    FOUNDING_CONFIRM('\u0000', "Подтверждение основания"),
+    PROGRESSION('\u0000', "Развитие города"),
+    PROMOTION_CONFIRM('\u0000', "Подтверждение перехода");
 
     private final char glyph;
     private final String fallbackTitle;

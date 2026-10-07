@@ -20,6 +20,7 @@ public final class CitiesAdminCommand implements CommandExecutor {
         if (args.length == 0 || args[0].equalsIgnoreCase("status")) {
             sender.sendMessage("ServerMineCities: storage ready=" + cities.isReady()
                     + "; founding ready=" + cities.foundingService().filter(ru.servermine.cities.api.CityFoundingService::isReady).isPresent()
+                    + "; progression ready=" + cities.progressionService().filter(ru.servermine.cities.api.CityProgressionService::isReady).isPresent()
                     + "; territory purchases and other mutations are not enabled");
             sender.sendMessage("/smcities <givebook|open|preview> <игрок> [menu]");
             return true;

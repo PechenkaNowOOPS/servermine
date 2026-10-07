@@ -14,3 +14,10 @@ protection:
 territory:
   # Preview price, not an active purchase policy.
   chunk-price: 750
+progression:
+  # Promotion price and requirements are server balance settings. Price 0 makes this transition free.
+  settlement-to-village:
+    enabled: true
+    price: 0
+    minimum-residents: 1
+    minimum-chunks: 4

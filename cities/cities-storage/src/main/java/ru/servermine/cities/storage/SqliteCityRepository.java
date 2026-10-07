@@ -6,7 +6,10 @@ import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.api.CityFoundationCode;
 import ru.servermine.cities.api.CityFoundationDraft;
 import ru.servermine.cities.api.CityFoundationResult;
+import ru.servermine.cities.api.CityPromotionCode;
+import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.core.CityRepository;
+import ru.servermine.cities.core.CityPromotionDraft;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -378,6 +381,281 @@ public final class SqliteCityRepository implements CityRepository {
 
     private record ExistingOperation(String type, String requestHash, String state, String resultCode, String cityId) { }
 
+    @Override
+    public CompletionStage<CityPromotionResult> preparePromotion(CityPromotionDraft draft) {
+        return async(() -> promotionTransaction(connection -> {
+            String payload = promotionPayload(draft);
+            String hash = sha256(payload);
+            ExistingOperation operation = findOperation(connection, draft.operationId());
+            if (operation != null) return promotionReplay(connection, draft, operation, hash);
+
+            try (PreparedStatement query = connection.prepareStatement("""
+                    SELECT operation_uuid FROM city_operations WHERE city_uuid=? AND operation_type='PROMOTE_CITY'
+                      AND state IN ('PREPARED','RESERVED','DOMAIN_COMMITTED','COMMIT_PENDING','RELEASE_PENDING')
+                    LIMIT 1
+                    """)) {
+                query.setString(1, draft.cityId().toString());
+                try (ResultSet pending = query.executeQuery()) {
+                    if (pending.next()) {
+                        connection.commit();
+                        return promotionResult(draft.operationId(), CityPromotionCode.OPERATION_IN_PROGRESS, null, true);
+                    }
+                }
+            }
+
+            CityPromotionCode failure = promotionFailure(connection, draft);
+            String now = Instant.now().toString();
+            if (failure != null) {
+                writePromotionOperation(connection, draft, hash, payload, "FAILED", failure, now);
+                connection.commit();
+                return promotionResult(draft.operationId(), failure, null, false);
+            }
+            writePromotionOperation(connection, draft, hash, payload, "PREPARED", CityPromotionCode.OPERATION_IN_PROGRESS, now);
+            connection.commit();
+            return promotionResult(draft.operationId(), CityPromotionCode.OPERATION_IN_PROGRESS, null, false);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Boolean> reservePromotion(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RESERVED', updated_at=?
+                    WHERE operation_uuid=? AND operation_type='PROMOTE_CITY' AND state='PREPARED'
+                    """)) {
+                update.setString(1, Instant.now().toString());
+                update.setString(2, operationId.toString());
+                int changed = update.executeUpdate();
+                if (changed == 1) return true;
+                ExistingOperation operation = findOperation(connection, operationId);
+                return operation != null && operation.type.equals("PROMOTE_CITY") && operation.state.equals("RESERVED");
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<CityPromotionResult> applyPromotion(CityPromotionDraft draft) {
+        return async(() -> promotionTransaction(connection -> {
+            String payload = promotionPayload(draft);
+            String hash = sha256(payload);
+            ExistingOperation operation = findOperation(connection, draft.operationId());
+            if (operation == null || !operation.type.equals("PROMOTE_CITY") || !operation.requestHash.equals(hash)) {
+                connection.rollback();
+                return promotionResult(draft.operationId(), CityPromotionCode.OPERATION_CONFLICT, null, true);
+            }
+            if (operation.state.equals("DOMAIN_COMMITTED") || operation.state.equals("COMMIT_PENDING") || operation.state.equals("COMPLETED")) {
+                CityView current = readCity(connection, draft.cityId()).orElse(null);
+                connection.commit();
+                return promotionResult(draft.operationId(), current == null ? CityPromotionCode.INTERNAL_ERROR
+                        : CityPromotionCode.REPLAYED, current, true);
+            }
+            if (!operation.state.equals("RESERVED")) {
+                connection.commit();
+                return promotionResult(draft.operationId(), operation.state.equals("FAILED") || operation.state.equals("RELEASED")
+                        ? parsePromotionCode(operation.resultCode) : CityPromotionCode.OPERATION_IN_PROGRESS, null, true);
+            }
+
+            CityPromotionCode failure = promotionFailure(connection, draft);
+            if (failure != null) {
+                setOperationState(connection, draft.operationId(), "RELEASE_PENDING", failure);
+                connection.commit();
+                return promotionResult(draft.operationId(), failure, null, false);
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE cities SET stage=?, revision=revision+1
+                    WHERE city_uuid=? AND stage=? AND revision=?
+                    """)) {
+                update.setString(1, draft.toStage().name());
+                update.setString(2, draft.cityId().toString());
+                update.setString(3, draft.fromStage().name());
+                update.setLong(4, draft.expectedRevision());
+                if (update.executeUpdate() != 1) {
+                    setOperationState(connection, draft.operationId(), "RELEASE_PENDING", CityPromotionCode.STALE_REVISION);
+                    connection.commit();
+                    return promotionResult(draft.operationId(), CityPromotionCode.STALE_REVISION, null, false);
+                }
+            }
+            setOperationState(connection, draft.operationId(), "DOMAIN_COMMITTED", CityPromotionCode.PROMOTED);
+            CityView updated = readCity(connection, draft.cityId()).orElseThrow(() -> new SQLException("Promoted city disappeared"));
+            connection.commit();
+            return promotionResult(draft.operationId(), CityPromotionCode.PROMOTED, updated, false);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Void> markPromotionCommitPending(UUID operationId) {
+        return async(() -> { updatePromotionState(operationId, "DOMAIN_COMMITTED", "COMMIT_PENDING", CityPromotionCode.UNKNOWN_OUTCOME); return null; });
+    }
+
+    @Override
+    public CompletionStage<CityPromotionResult> completePromotion(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection()) {
+                connection.setAutoCommit(false);
+                ExistingOperation operation = findOperation(connection, operationId);
+                if (operation == null || !operation.type.equals("PROMOTE_CITY")) {
+                    connection.commit();
+                    return promotionResult(operationId, CityPromotionCode.OPERATION_CONFLICT, null, true);
+                }
+                  if (operation.state.equals("DOMAIN_COMMITTED") || operation.state.equals("COMMIT_PENDING")) {
+                      setOperationState(connection, operationId, "COMPLETED", CityPromotionCode.PROMOTED);
+                      operation = findOperation(connection, operationId);
+                  }
+                  if (!operation.state.equals("COMPLETED")) {
+                      connection.commit();
+                      return promotionResult(operationId, CityPromotionCode.OPERATION_IN_PROGRESS, null, true);
+                  }
+                  CityView city = operation.cityId == null ? null : readCity(connection, UUID.fromString(operation.cityId)).orElse(null);
+                  connection.commit();
+                  return promotionResult(operationId, city == null ? CityPromotionCode.INTERNAL_ERROR
+                          : CityPromotionCode.REPLAYED, city, true);
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<Void> failPromotion(UUID operationId, CityPromotionCode code, boolean releasePending) {
+        return async(() -> {
+            String expected = releasePending ? "RESERVED" : "PREPARED";
+            String target = releasePending ? "RELEASE_PENDING" : "FAILED";
+            updatePromotionState(operationId, expected, target, code);
+            return null;
+        });
+    }
+
+    @Override
+    public CompletionStage<Void> markPromotionReleased(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RELEASED', updated_at=?
+                    WHERE operation_uuid=? AND operation_type='PROMOTE_CITY' AND state='RELEASE_PENDING'
+                    """)) {
+                update.setString(1, Instant.now().toString());
+                update.setString(2, operationId.toString());
+                update.executeUpdate();
+                return null;
+            }
+        });
+    }
+
+    private CityPromotionCode promotionFailure(Connection connection, CityPromotionDraft draft) throws SQLException {
+        CityView city = readCity(connection, draft.cityId()).orElse(null);
+        if (city == null) return CityPromotionCode.NOT_FOUND;
+        if (city.revision() != draft.expectedRevision()) return CityPromotionCode.STALE_REVISION;
+        if (city.stage() != draft.fromStage() || city.stage().ordinal() + 1 != draft.toStage().ordinal()) {
+            return CityPromotionCode.INVALID_STAGE;
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT role_id FROM city_members WHERE city_uuid=? AND player_uuid=?
+                """)) {
+            query.setString(1, draft.cityId().toString());
+            query.setString(2, draft.actorId().toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) return CityPromotionCode.NOT_MEMBER;
+                if (!result.getString("role_id").equals("RULER")) return CityPromotionCode.PERMISSION_DENIED;
+            }
+        }
+        if (city.residents().size() < draft.minimumResidents() || city.chunks().size() < draft.minimumChunks()) {
+            return CityPromotionCode.REQUIREMENTS_NOT_MET;
+        }
+        return null;
+    }
+
+    private CityPromotionResult promotionReplay(Connection connection, CityPromotionDraft draft,
+                                                 ExistingOperation operation, String hash) throws SQLException {
+        if (!operation.type.equals("PROMOTE_CITY") || !operation.requestHash.equals(hash)) {
+            connection.commit();
+            return promotionResult(draft.operationId(), CityPromotionCode.OPERATION_CONFLICT, null, true);
+        }
+        if (operation.state.equals("COMPLETED")) {
+            CityView city = operation.cityId == null ? null : readCity(connection, UUID.fromString(operation.cityId)).orElse(null);
+            connection.commit();
+            return promotionResult(draft.operationId(), city == null ? CityPromotionCode.INTERNAL_ERROR
+                    : CityPromotionCode.REPLAYED, city, true);
+        }
+        if (operation.state.equals("FAILED") || operation.state.equals("RELEASED")) {
+            connection.commit();
+            return promotionResult(draft.operationId(), parsePromotionCode(operation.resultCode), null, true);
+        }
+        connection.commit();
+        return promotionResult(draft.operationId(), CityPromotionCode.OPERATION_IN_PROGRESS, null, true);
+    }
+
+    private void writePromotionOperation(Connection connection, CityPromotionDraft draft, String hash,
+                                         String payload, String state, CityPromotionCode code, String now) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO city_operations(operation_uuid, operation_type, request_hash, request_payload, state,
+                    result_code, city_uuid, actor_uuid, created_at, updated_at)
+                VALUES (?, 'PROMOTE_CITY', ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, draft.operationId().toString());
+            insert.setString(2, hash);
+            insert.setString(3, payload);
+            insert.setString(4, state);
+            insert.setString(5, code.name());
+            insert.setString(6, draft.cityId().toString());
+            insert.setString(7, draft.actorId().toString());
+            insert.setString(8, now);
+            insert.setString(9, now);
+            insert.executeUpdate();
+        }
+    }
+
+    private String promotionPayload(CityPromotionDraft draft) {
+        return draft.cityId() + "\n" + draft.actorId() + "\n" + draft.expectedRevision() + "\n"
+                + draft.fromStage() + "\n" + draft.toStage() + "\n" + draft.price() + "\n"
+                + draft.minimumResidents() + "\n" + draft.minimumChunks();
+    }
+
+    private CityPromotionCode parsePromotionCode(String value) {
+        try { return CityPromotionCode.valueOf(value); }
+        catch (IllegalArgumentException invalid) { return CityPromotionCode.INTERNAL_ERROR; }
+    }
+
+    private CityPromotionResult promotionResult(UUID operationId, CityPromotionCode code, CityView city, boolean replay) {
+        Optional<CityView> view = code == CityPromotionCode.PROMOTED || code == CityPromotionCode.REPLAYED
+                ? Optional.ofNullable(city) : Optional.empty();
+        if (view.isEmpty() && (code == CityPromotionCode.PROMOTED || code == CityPromotionCode.REPLAYED)) {
+            code = CityPromotionCode.INTERNAL_ERROR;
+        }
+        return new CityPromotionResult(operationId, code, view, replay);
+    }
+
+    private <T> T promotionTransaction(SqlTransaction<T> action) throws SQLException {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try { return action.run(connection); }
+            catch (SQLException | RuntimeException error) { connection.rollback(); throw error; }
+        }
+    }
+
+    private void setOperationState(Connection connection, UUID operationId, String state, CityPromotionCode code) throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE city_operations SET state=?, result_code=?, updated_at=?
+                WHERE operation_uuid=? AND operation_type='PROMOTE_CITY'
+                """)) {
+            update.setString(1, state);
+            update.setString(2, code.name());
+            update.setString(3, Instant.now().toString());
+            update.setString(4, operationId.toString());
+            if (update.executeUpdate() != 1) throw new SQLException("Promotion journal entry disappeared");
+        }
+    }
+
+    private void updatePromotionState(UUID operationId, String expected, String target, CityPromotionCode code) throws SQLException {
+        try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                UPDATE city_operations SET state=?, result_code=?, updated_at=?
+                WHERE operation_uuid=? AND operation_type='PROMOTE_CITY' AND state=?
+                """)) {
+            update.setString(1, target);
+            update.setString(2, code.name());
+            update.setString(3, Instant.now().toString());
+            update.setString(4, operationId.toString());
+            update.setString(5, expected);
+            update.executeUpdate();
+        }
+    }
+
     private Optional<CityView> readCity(UUID cityId) {
         try (Connection connection = connection()) {
             connection.setAutoCommit(false);
@@ -461,5 +739,10 @@ public final class SqliteCityRepository implements CityRepository {
     @FunctionalInterface
     private interface SqlOperation<T> {
         T run() throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface SqlTransaction<T> {
+        T run(Connection connection) throws SQLException;
     }
 }

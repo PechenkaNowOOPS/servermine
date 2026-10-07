@@ -4,10 +4,13 @@ import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import ru.servermine.cities.api.CitiesService;
 import ru.servermine.cities.api.CityFoundingService;
+import ru.servermine.cities.api.CityStage;
 import ru.servermine.cities.core.PersistedCitiesService;
 import ru.servermine.cities.storage.SqliteCityRepository;
 import ru.servermine.cities.creation.CityFoundingServiceImpl;
 import ru.servermine.cities.protection.BukkitFoundationPolicy;
+import ru.servermine.cities.progression.CityProgressionServiceImpl;
+import ru.servermine.cities.progression.StagePromotionPolicy;
 import ru.servermine.cities.admin.CitiesAdminCommand;
 import ru.servermine.cities.gui.*;
 import ru.servermine.economy.api.EconomyService;
@@ -22,6 +25,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
     private ExecutorService databaseExecutor;
     private PersistedCitiesService citiesService;
     private CityFoundingServiceImpl cityFoundingService;
+    private CityProgressionServiceImpl cityProgressionService;
 
     @Override public void onEnable() {
         try {
@@ -40,7 +44,9 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
 
             BukkitFoundationPolicy protection = new BukkitFoundationPolicy(this, loadSystemZones());
             cityFoundingService = new CityFoundingServiceImpl(repository, protection);
-            citiesService = new PersistedCitiesService(repository, cityFoundingService);
+            EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
+            cityProgressionService = new CityProgressionServiceImpl(repository, economy, loadPromotionPolicies());
+            citiesService = new PersistedCitiesService(repository, cityFoundingService, cityProgressionService);
             getServer().getServicesManager().register(CitiesService.class, citiesService, this, ServicePriority.Normal);
             CityBookService books = new CityBookService(this);
             MenuManager menus = new MenuManager(this, citiesService);
@@ -48,9 +54,8 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             Objects.requireNonNull(getCommand("smcities"), "smcities command is missing")
                     .setExecutor(new CitiesAdminCommand(citiesService, books, menus));
 
-            EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
-            getLogger().info("City founding from the management book is ready; territory purchases and other city mutations are still under development.");
+            getLogger().info("City founding and configured progression services are ready; territory purchases and other city mutations are still under development.");
         } catch (Exception error) {
             getLogger().severe("ServerMineCities could not initialize its database: " + error.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "Cities startup failed", error);
@@ -59,6 +64,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
         }
     }
     @Override public void onDisable() {
+        if (cityProgressionService != null) cityProgressionService.deactivate();
         if (cityFoundingService != null) cityFoundingService.deactivate();
         if (citiesService != null) citiesService.deactivate();
         getServer().getServicesManager().unregisterAll(this);
@@ -66,6 +72,16 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             .filter(p -> p.getOpenInventory().getTopInventory().getHolder() instanceof MenuHolder)
             .forEach(org.bukkit.entity.Player::closeInventory);
         closeDatabaseExecutor();
+    }
+
+    private java.util.Map<CityStage, StagePromotionPolicy> loadPromotionPolicies() {
+        java.util.Map<CityStage, StagePromotionPolicy> policies = new java.util.EnumMap<>(CityStage.class);
+        policies.put(CityStage.SETTLEMENT, new StagePromotionPolicy(
+                getConfig().getBoolean("progression.settlement-to-village.enabled", true),
+                getConfig().getLong("progression.settlement-to-village.price", 0),
+                getConfig().getInt("progression.settlement-to-village.minimum-residents", 1),
+                getConfig().getInt("progression.settlement-to-village.minimum-chunks", 4)));
+        return java.util.Map.copyOf(policies);
     }
 
     private java.util.List<BukkitFoundationPolicy.SystemZone> loadSystemZones() {

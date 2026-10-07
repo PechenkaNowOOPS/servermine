@@ -15,4 +15,9 @@ public interface CitiesService {
     default Optional<CityFoundingService> foundingService() {
         return Optional.empty();
     }
+
+    /** Optional stage promotion workflow, backed by Cities and Economy. */
+    default Optional<CityProgressionService> progressionService() {
+        return Optional.empty();
+    }
 }

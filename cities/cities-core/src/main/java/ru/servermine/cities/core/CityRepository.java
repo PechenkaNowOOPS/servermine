@@ -3,6 +3,7 @@ package ru.servermine.cities.core;
 import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.api.CityFoundationDraft;
 import ru.servermine.cities.api.CityFoundationResult;
+import ru.servermine.cities.api.CityPromotionResult;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -17,4 +18,19 @@ public interface CityRepository {
     CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft);
 
     CompletionStage<CityFoundationResult> found(CityFoundationDraft draft);
+
+    CompletionStage<CityPromotionResult> preparePromotion(CityPromotionDraft draft);
+
+    CompletionStage<Boolean> reservePromotion(UUID operationId);
+
+    CompletionStage<CityPromotionResult> applyPromotion(CityPromotionDraft draft);
+
+    CompletionStage<Void> markPromotionCommitPending(UUID operationId);
+
+    CompletionStage<CityPromotionResult> completePromotion(UUID operationId);
+
+    CompletionStage<Void> failPromotion(UUID operationId, ru.servermine.cities.api.CityPromotionCode code,
+                                        boolean releasePending);
+
+    CompletionStage<Void> markPromotionReleased(UUID operationId);
 }

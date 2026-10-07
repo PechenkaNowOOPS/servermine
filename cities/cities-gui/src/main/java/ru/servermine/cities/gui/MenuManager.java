@@ -5,6 +5,10 @@ import ru.servermine.cities.api.CitiesService;
 import ru.servermine.cities.api.CityFoundationCode;
 import ru.servermine.cities.api.CityFoundationRequest;
 import ru.servermine.cities.api.CityFoundingService;
+import ru.servermine.cities.api.CityProgressionService;
+import ru.servermine.cities.api.CityPromotionCode;
+import ru.servermine.cities.api.CityPromotionRequest;
+import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.api.ChunkPosition;
 import ru.servermine.cities.api.CityStage;
 import ru.servermine.cities.api.CityView;
@@ -25,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.time.Instant;
+import java.util.UUID;
 
 public final class MenuManager {
     private static final Key GUI_FONT = Key.key("gradostroy", "gui");
@@ -35,6 +40,9 @@ public final class MenuManager {
     private final CitiesService cities;
     private final java.util.Map<java.util.UUID, java.util.UUID> requests = new java.util.HashMap<>();
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingFounding> pendingFounding = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingPromotion> pendingPromotions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<java.util.UUID, java.util.UUID> cityIds = new java.util.HashMap<>();
+    private final java.util.Map<java.util.UUID, CitySnapshot> cityViews = new java.util.HashMap<>();
 
     public MenuManager(JavaPlugin plugin, CitiesService cities) {
         this.plugin = plugin;
@@ -46,6 +54,9 @@ public final class MenuManager {
     public void clearPlayer(Player player) {
         forget(player);
         pendingFounding.remove(player.getUniqueId());
+        pendingPromotions.remove(player.getUniqueId());
+        cityIds.remove(player.getUniqueId());
+        cityViews.remove(player.getUniqueId());
     }
 
     public boolean isAwaitingCityName(java.util.UUID playerId) {
@@ -94,7 +105,7 @@ public final class MenuManager {
                     player.sendMessage(Component.text("Не удалось загрузить город.", NamedTextColor.RED));
                 } else if (city.isEmpty()) {
                     showFounding(player, MenuType.FOUNDING, null);
-                } else show(player, type, snapshot(city.get()), false);
+                } else show(player, type, snapshot(city.get()), false, city.get().id());
             });
         });
     }
@@ -110,7 +121,9 @@ public final class MenuManager {
                     new CitySnapshot.ResidentEntry("Kray", "Житель"),
                     new CitySnapshot.ResidentEntry("Velmira", "Житель"),
                     new CitySnapshot.ResidentEntry("Witch", "Временный заместитель")));
-        show(player, type, city, true);
+        cityIds.remove(player.getUniqueId());
+        cityViews.remove(player.getUniqueId());
+        show(player, type, city, true, null);
     }
 
     private CitySnapshot snapshot(CityView city) {
@@ -118,7 +131,11 @@ public final class MenuManager {
             city.residents().stream().map(r -> new CitySnapshot.ResidentEntry(r.name(), r.role())).toList());
     }
 
-    private void show(Player player, MenuType type, CitySnapshot city, boolean preview) {
+    private void show(Player player, MenuType type, CitySnapshot city, boolean preview, java.util.UUID cityId) {
+        if (cityId != null) {
+            cityIds.put(player.getUniqueId(), cityId);
+            cityViews.put(player.getUniqueId(), city);
+        }
         MenuHolder holder = new MenuHolder(MenuSession.create(player.getUniqueId(), type, city.revision(), preview));
         Inventory inventory = Bukkit.createInventory(holder, 54, title(type, preview));
         holder.bind(inventory);
@@ -153,7 +170,42 @@ public final class MenuManager {
             case DIPLOMACY -> renderDiplomacy(inv, city);
             case MARKET -> { inv.setItem(22, button(Material.CHEST, "Городской рынок", "Модуль подготовлен к разработке.")); inv.setItem(45, back()); }
             case FOUNDING, FOUNDING_CONFIRM -> { }
+            case PROGRESSION -> renderProgression(inv, city, false);
+            case PROMOTION_CONFIRM -> renderProgression(inv, city, true);
         }
+    }
+
+    private void renderProgression(Inventory inv, CitySnapshot city, boolean confirm) {
+        CityProgressionService service = cities.progressionService().orElse(null);
+        java.util.Optional<CityStage> next = service == null ? java.util.Optional.empty() : service.nextStage(city.stage());
+        if (next.isEmpty()) {
+            inv.setItem(13, button(Material.BOOK, "Развитие города", "Переход для этапа " + city.stage().displayName() + " не настроен."));
+            inv.setItem(45, back());
+            return;
+        }
+        long price = service.promotionPrice(city.stage());
+        int minResidents = service.minimumResidents(city.stage());
+        int minChunks = service.minimumChunks(city.stage());
+        if (confirm) {
+            inv.setItem(13, button(Material.EXPERIENCE_BOTTLE, "Переход в «" + next.get().displayName() + "»",
+                    "Текущий этап: " + city.stage().displayName(), "Стоимость: " + money(price),
+                    "Жителей: " + city.residents().size() + " / " + minResidents,
+                    "Чанков: " + city.territory() + " / " + minChunks,
+                    "Ревизия города: " + city.revision()));
+            inv.setItem(29, button(Material.LIME_CONCRETE, "Подтвердить переход", "Стоимость спишется не более одного раза."));
+            inv.setItem(33, button(Material.RED_CONCRETE, "Отмена", "Вернуться к развитию города."));
+            return;
+        }
+        boolean eligible = city.residents().size() >= minResidents && city.territory() >= minChunks;
+        inv.setItem(13, button(Material.BOOK, "Развитие: " + city.name(),
+                "Этап: " + city.stage().displayName() + " → " + next.get().displayName(),
+                "Жители: " + city.residents().size() + " / " + minResidents,
+                "Территория: " + city.territory() + " / " + minChunks + " чанков",
+                "Стоимость: " + money(price)));
+        inv.setItem(31, button(eligible ? Material.LIME_CONCRETE : Material.BARRIER,
+                eligible ? "Перейти в «" + next.get().displayName() + "»" : "Требования не выполнены",
+                "Открыть подтверждение."));
+        inv.setItem(45, back());
     }
 
     private void showFounding(Player player, MenuType type, PendingFounding pending) {
@@ -232,6 +284,75 @@ public final class MenuManager {
             case SERVICE_UNAVAILABLE -> "Сервис основания города сейчас недоступен.";
             case INTERNAL_ERROR -> "Не удалось создать город из-за внутренней ошибки.";
             case CREATED, REPLAYED -> "Город создан.";
+        };
+    }
+
+    private void beginPromotion(Player player, MenuSession session) {
+        CityProgressionService progression = cities.progressionService().orElse(null);
+        java.util.UUID cityId = cityIds.get(player.getUniqueId());
+        CitySnapshot city = cityViews.get(player.getUniqueId());
+        if (progression == null || !progression.isReady() || cityId == null || city == null) {
+            player.sendMessage(Component.text("Развитие города сейчас недоступно.", NamedTextColor.RED));
+            return;
+        }
+        if (progression.nextStage(city.stage()).isEmpty()) {
+            player.sendMessage(Component.text("Для этого этапа переход пока не настроен.", NamedTextColor.RED));
+            return;
+        }
+        if (city.residents().size() < progression.minimumResidents(city.stage())
+                || city.territory() < progression.minimumChunks(city.stage())) {
+            player.sendMessage(Component.text("Город пока не выполняет требования для перехода.", NamedTextColor.RED));
+            return;
+        }
+        pendingPromotions.put(player.getUniqueId(), new PendingPromotion(UUID.randomUUID(), cityId,
+                city.stage(), session.cityRevision()));
+        open(player, MenuType.PROMOTION_CONFIRM);
+    }
+
+    private void confirmPromotion(Player player) {
+        PendingPromotion pending = pendingPromotions.remove(player.getUniqueId());
+        CityProgressionService progression = cities.progressionService().orElse(null);
+        if (pending == null || progression == null || !progression.isReady()) {
+            player.sendMessage(Component.text("Развитие города сейчас недоступно.", NamedTextColor.RED));
+            return;
+        }
+        player.closeInventory();
+        player.sendMessage(Component.text("Проверяю требования и выполняю переход…", NamedTextColor.YELLOW));
+        CityPromotionRequest request = new CityPromotionRequest(pending.operationId, pending.cityId,
+                player.getUniqueId(), pending.expectedStage, pending.revision);
+        progression.promote(request).whenComplete((result, error) -> {
+            if (!plugin.isEnabled()) return;
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!player.isOnline()) return;
+                if (error != null) {
+                    player.sendMessage(Component.text("Не удалось подтвердить результат перехода. Не повторяйте оплату; обратитесь к администратору.", NamedTextColor.RED));
+                    plugin.getLogger().warning("City promotion failed for operation " + pending.operationId + ": " + error);
+                } else if (result.code() == CityPromotionCode.PROMOTED || result.code() == CityPromotionCode.REPLAYED) {
+                    player.sendMessage(Component.text("Город перешёл на этап «" + result.city().orElseThrow().stage().displayName() + "»!", NamedTextColor.GREEN));
+                    open(player, MenuType.MAIN);
+                } else {
+                    player.sendMessage(Component.text(promotionMessage(result.code()), NamedTextColor.RED));
+                    open(player, MenuType.PROGRESSION);
+                }
+            });
+        });
+    }
+
+    private String promotionMessage(CityPromotionCode code) {
+        return switch (code) {
+            case NOT_FOUND -> "Город не найден.";
+            case NOT_MEMBER -> "Вы не состоите в этом городе.";
+            case PERMISSION_DENIED -> "Повышать этап может только правитель города.";
+            case INVALID_STAGE -> "Такой переход этапа сейчас недоступен.";
+            case STALE_REVISION -> "Состояние города изменилось. Откройте книгу заново.";
+            case REQUIREMENTS_NOT_MET -> "Город пока не выполняет требования для перехода.";
+            case INSUFFICIENT_FUNDS -> "Недостаточно монет для перехода.";
+            case ECONOMY_UNAVAILABLE -> "Экономика сейчас недоступна.";
+            case OPERATION_CONFLICT -> "Операция конфликтует с предыдущим запросом.";
+            case OPERATION_IN_PROGRESS, UNKNOWN_OUTCOME -> "Операция ещё не подтверждена. Не повторяйте оплату; обратитесь к администратору.";
+            case SERVICE_UNAVAILABLE -> "Сервис развития города сейчас недоступен.";
+            case INTERNAL_ERROR -> "Не удалось выполнить переход из-за внутренней ошибки.";
+            case PROMOTED, REPLAYED -> "Переход выполнен.";
         };
     }
 
@@ -346,6 +467,7 @@ public final class MenuManager {
         };
         else if (session.menuType() == MenuType.TERRITORY && rawSlot == 40) target = MenuType.PURCHASE;
         else if (session.menuType() == MenuType.PURCHASE && rawSlot == 42) target = MenuType.TERRITORY;
+        else if (session.menuType() == MenuType.MANAGEMENT && rawSlot == 41) target = MenuType.PROGRESSION;
         if (target != null) {
             if (session.preview()) openPreview(player, target); else open(player, target);
         } else if (session.menuType() == MenuType.FOUNDING && rawSlot == 31) {
@@ -355,6 +477,13 @@ public final class MenuManager {
         } else if (session.menuType() == MenuType.FOUNDING_CONFIRM && rawSlot == 33) {
             pendingFounding.remove(player.getUniqueId());
             showFounding(player, MenuType.FOUNDING, null);
+        } else if (session.menuType() == MenuType.PROGRESSION && rawSlot == 31) {
+            beginPromotion(player, session);
+        } else if (session.menuType() == MenuType.PROMOTION_CONFIRM && rawSlot == 29) {
+            confirmPromotion(player);
+        } else if (session.menuType() == MenuType.PROMOTION_CONFIRM && rawSlot == 33) {
+            pendingPromotions.remove(player.getUniqueId());
+            open(player, MenuType.PROGRESSION);
         } else {
             player.sendMessage(Component.text("Этот раздел пока доступен только для просмотра.", NamedTextColor.YELLOW));
         }
@@ -388,4 +517,6 @@ public final class MenuManager {
     private record PendingFounding(java.util.UUID operationId, ChunkPosition anchor, String cityName, Instant createdAt) {
         PendingFounding withName(String name) { return new PendingFounding(operationId, anchor, name, createdAt); }
     }
+
+    private record PendingPromotion(UUID operationId, UUID cityId, CityStage expectedStage, long revision) { }
 }
