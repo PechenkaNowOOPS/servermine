@@ -4,8 +4,10 @@ import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.api.CityFoundationDraft;
 import ru.servermine.cities.api.CityFoundationResult;
 import ru.servermine.cities.api.CityPromotionResult;
+import ru.servermine.cities.api.CityClaimResult;
 
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 
@@ -33,4 +35,22 @@ public interface CityRepository {
                                         boolean releasePending);
 
     CompletionStage<Void> markPromotionReleased(UUID operationId);
+
+    CompletionStage<CityClaimResult> prepareClaim(CityClaimDraft draft);
+
+    CompletionStage<Boolean> reserveClaim(UUID operationId);
+
+    CompletionStage<CityClaimResult> applyClaim(CityClaimDraft draft);
+
+    CompletionStage<Void> markClaimCommitPending(UUID operationId);
+
+    CompletionStage<CityClaimResult> completeClaim(UUID operationId);
+
+    CompletionStage<Void> failClaim(UUID operationId, ru.servermine.cities.api.CityClaimCode code);
+
+    CompletionStage<Void> markClaimReleasePending(UUID operationId, ru.servermine.cities.api.CityClaimCode code);
+
+    CompletionStage<Void> markClaimReleased(UUID operationId);
+
+    CompletionStage<Set<ru.servermine.cities.api.ChunkPosition>> claimedChunks(Set<ru.servermine.cities.api.ChunkPosition> candidates);
 }

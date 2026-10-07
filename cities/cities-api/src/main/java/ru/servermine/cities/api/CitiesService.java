@@ -20,4 +20,9 @@ public interface CitiesService {
     default Optional<CityProgressionService> progressionService() {
         return Optional.empty();
     }
+
+    /** Optional paid city-territory claim workflow. */
+    default Optional<CityTerritoryService> territoryService() {
+        return Optional.empty();
+    }
 }

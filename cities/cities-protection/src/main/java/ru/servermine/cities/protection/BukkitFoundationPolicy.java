@@ -33,6 +33,44 @@ public final class BukkitFoundationPolicy implements FoundationPolicy {
         return result;
     }
 
+    public CompletionStage<FoundationDecision> checkTarget(ChunkPosition target) {
+        if (Bukkit.isPrimaryThread()) return CompletableFuture.completedFuture(safeCheck(Set.of(target)));
+        CompletableFuture<FoundationDecision> result = new CompletableFuture<>();
+        try {
+            Bukkit.getScheduler().runTask(plugin, () -> result.complete(safeCheck(Set.of(target))));
+        } catch (RuntimeException unavailable) {
+            result.complete(FoundationDecision.WORLD_UNAVAILABLE);
+        }
+        return result;
+    }
+
+    public CompletionStage<List<ChunkPosition>> checkTargets(Set<ChunkPosition> targets) {
+        if (Bukkit.isPrimaryThread()) return CompletableFuture.completedFuture(allowedTargets(targets));
+        CompletableFuture<List<ChunkPosition>> result = new CompletableFuture<>();
+        try {
+            Bukkit.getScheduler().runTask(plugin, () -> result.complete(allowedTargets(targets)));
+        } catch (RuntimeException unavailable) {
+            result.complete(List.of());
+        }
+        return result;
+    }
+
+    private List<ChunkPosition> allowedTargets(Set<ChunkPosition> targets) {
+        try {
+            List<ChunkPosition> allowed = new java.util.ArrayList<>();
+            for (ChunkPosition chunk : targets) {
+                World world = Bukkit.getWorld(chunk.worldId());
+                if (world == null) continue;
+                Location center = new Location(world, chunk.x() * 16.0 + 8.0, 0.0, chunk.z() * 16.0 + 8.0);
+                if (!world.getWorldBorder().isInside(center)) continue;
+                if (zones.stream().noneMatch(zone -> zone.contains(chunk))) allowed.add(chunk);
+            }
+            return List.copyOf(allowed);
+        } catch (RuntimeException unavailable) {
+            return List.of();
+        }
+    }
+
     private FoundationDecision safeCheck(Set<ChunkPosition> chunks) {
         try {
             return checkOnMain(chunks);

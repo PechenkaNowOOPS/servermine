@@ -11,6 +11,7 @@ import ru.servermine.cities.creation.CityFoundingServiceImpl;
 import ru.servermine.cities.protection.BukkitFoundationPolicy;
 import ru.servermine.cities.progression.CityProgressionServiceImpl;
 import ru.servermine.cities.progression.StagePromotionPolicy;
+import ru.servermine.cities.territory.CityTerritoryServiceImpl;
 import ru.servermine.cities.admin.CitiesAdminCommand;
 import ru.servermine.cities.gui.*;
 import ru.servermine.economy.api.EconomyService;
@@ -26,6 +27,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
     private PersistedCitiesService citiesService;
     private CityFoundingServiceImpl cityFoundingService;
     private CityProgressionServiceImpl cityProgressionService;
+    private CityTerritoryServiceImpl cityTerritoryService;
 
     @Override public void onEnable() {
         try {
@@ -46,7 +48,12 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             cityFoundingService = new CityFoundingServiceImpl(repository, protection);
             EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
             cityProgressionService = new CityProgressionServiceImpl(repository, economy, loadPromotionPolicies());
-            citiesService = new PersistedCitiesService(repository, cityFoundingService, cityProgressionService);
+            cityTerritoryService = new CityTerritoryServiceImpl(repository, economy,
+                    getConfig().getLong("territory.chunk-price", 750),
+                    target -> protection.checkTarget(target).thenApply(decision -> decision == ru.servermine.cities.protection.FoundationDecision.ALLOWED),
+                    protection::checkTargets);
+            citiesService = new PersistedCitiesService(repository, cityFoundingService, cityProgressionService,
+                    cityTerritoryService);
             getServer().getServicesManager().register(CitiesService.class, citiesService, this, ServicePriority.Normal);
             CityBookService books = new CityBookService(this);
             MenuManager menus = new MenuManager(this, citiesService);
@@ -55,7 +62,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
                     .setExecutor(new CitiesAdminCommand(citiesService, books, menus));
 
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
-            getLogger().info("City founding and configured progression services are ready; territory purchases and other city mutations are still under development.");
+            getLogger().info("City founding, configured progression, and territory purchase services are ready.");
         } catch (Exception error) {
             getLogger().severe("ServerMineCities could not initialize its database: " + error.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "Cities startup failed", error);
@@ -65,6 +72,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
     }
     @Override public void onDisable() {
         if (cityProgressionService != null) cityProgressionService.deactivate();
+        if (cityTerritoryService != null) cityTerritoryService.deactivate();
         if (cityFoundingService != null) cityFoundingService.deactivate();
         if (citiesService != null) citiesService.deactivate();
         getServer().getServicesManager().unregisterAll(this);

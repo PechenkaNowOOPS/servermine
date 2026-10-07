@@ -21,7 +21,7 @@ public final class CitiesAdminCommand implements CommandExecutor {
             sender.sendMessage("ServerMineCities: storage ready=" + cities.isReady()
                     + "; founding ready=" + cities.foundingService().filter(ru.servermine.cities.api.CityFoundingService::isReady).isPresent()
                     + "; progression ready=" + cities.progressionService().filter(ru.servermine.cities.api.CityProgressionService::isReady).isPresent()
-                    + "; territory purchases and other mutations are not enabled");
+                    + "; territory ready=" + cities.territoryService().filter(ru.servermine.cities.api.CityTerritoryService::isReady).isPresent());
             sender.sendMessage("/smcities <givebook|open|preview> <игрок> [menu]");
             return true;
         }

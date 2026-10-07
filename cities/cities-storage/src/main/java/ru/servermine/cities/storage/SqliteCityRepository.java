@@ -8,8 +8,11 @@ import ru.servermine.cities.api.CityFoundationDraft;
 import ru.servermine.cities.api.CityFoundationResult;
 import ru.servermine.cities.api.CityPromotionCode;
 import ru.servermine.cities.api.CityPromotionResult;
+import ru.servermine.cities.api.CityClaimCode;
+import ru.servermine.cities.api.CityClaimResult;
 import ru.servermine.cities.core.CityRepository;
 import ru.servermine.cities.core.CityPromotionDraft;
+import ru.servermine.cities.core.CityClaimDraft;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -32,6 +35,8 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
+import java.util.HashSet;
 
 /**
  * SQLite adapter owned by Cities. Database calls run on the injected I/O executor;
@@ -536,6 +541,290 @@ public final class SqliteCityRepository implements CityRepository {
                 return null;
             }
         });
+    }
+
+    @Override
+    public CompletionStage<Set<ChunkPosition>> claimedChunks(Set<ChunkPosition> candidates) {
+        Set<ChunkPosition> copy = Set.copyOf(candidates);
+        return async(() -> {
+            Set<ChunkPosition> claimed = new HashSet<>();
+            try (Connection connection = connection(); PreparedStatement query = connection.prepareStatement(
+                    "SELECT 1 FROM city_chunks WHERE world_uuid=? AND chunk_x=? AND chunk_z=?")) {
+                for (ChunkPosition chunk : copy) {
+                    query.setString(1, chunk.worldId().toString());
+                    query.setInt(2, chunk.x());
+                    query.setInt(3, chunk.z());
+                    try (ResultSet result = query.executeQuery()) { if (result.next()) claimed.add(chunk); }
+                }
+            }
+            return Set.copyOf(claimed);
+        });
+    }
+
+    @Override
+    public CompletionStage<CityClaimResult> prepareClaim(CityClaimDraft draft) {
+        return async(() -> promotionTransaction(connection -> {
+            String payload = claimPayload(draft);
+            String hash = sha256(payload);
+            ExistingOperation operation = findOperation(connection, draft.operationId());
+            if (operation != null) return claimReplay(connection, draft, operation, hash);
+            try (PreparedStatement query = connection.prepareStatement("""
+                    SELECT operation_uuid FROM city_operations WHERE city_uuid=? AND operation_type='CLAIM_CHUNK'
+                      AND state IN ('PREPARED','RESERVED','DOMAIN_COMMITTED','COMMIT_PENDING','RELEASE_PENDING')
+                    LIMIT 1
+                    """)) {
+                query.setString(1, draft.cityId().toString());
+                try (ResultSet pending = query.executeQuery()) {
+                    if (pending.next()) {
+                        connection.commit();
+                        return claimResult(draft.operationId(), CityClaimCode.OPERATION_IN_PROGRESS, null, true);
+                    }
+                }
+            }
+            CityClaimCode failure = claimFailure(connection, draft);
+            String now = Instant.now().toString();
+            if (failure != null) {
+                writeClaimOperation(connection, draft, hash, payload, "FAILED", failure, now);
+                connection.commit();
+                return claimResult(draft.operationId(), failure, null, false);
+            }
+            writeClaimOperation(connection, draft, hash, payload, "PREPARED", CityClaimCode.OPERATION_IN_PROGRESS, now);
+            connection.commit();
+            return claimResult(draft.operationId(), CityClaimCode.OPERATION_IN_PROGRESS, null, false);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Boolean> reserveClaim(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RESERVED', updated_at=?
+                    WHERE operation_uuid=? AND operation_type='CLAIM_CHUNK' AND state='PREPARED'
+                    """)) {
+                update.setString(1, Instant.now().toString());
+                update.setString(2, operationId.toString());
+                if (update.executeUpdate() == 1) return true;
+                ExistingOperation operation = findOperation(connection, operationId);
+                return operation != null && operation.type.equals("CLAIM_CHUNK") && operation.state.equals("RESERVED");
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<CityClaimResult> applyClaim(CityClaimDraft draft) {
+        return async(() -> promotionTransaction(connection -> {
+            String hash = sha256(claimPayload(draft));
+            ExistingOperation operation = findOperation(connection, draft.operationId());
+            if (operation == null || !operation.type.equals("CLAIM_CHUNK") || !operation.requestHash.equals(hash)) {
+                connection.rollback();
+                return claimResult(draft.operationId(), CityClaimCode.OPERATION_CONFLICT, null, true);
+            }
+            if (operation.state.equals("DOMAIN_COMMITTED") || operation.state.equals("COMMIT_PENDING")
+                    || operation.state.equals("COMPLETED")) {
+                CityView current = readCity(connection, draft.cityId()).orElse(null);
+                connection.commit();
+                return claimResult(draft.operationId(), current == null ? CityClaimCode.INTERNAL_ERROR
+                        : CityClaimCode.REPLAYED, current, true);
+            }
+            if (!operation.state.equals("RESERVED")) {
+                connection.commit();
+                CityClaimCode code = operation.state.equals("FAILED") || operation.state.equals("RELEASED")
+                        ? parseClaimCode(operation.resultCode) : CityClaimCode.OPERATION_IN_PROGRESS;
+                return claimResult(draft.operationId(), code, null, true);
+            }
+            CityClaimCode failure = claimFailure(connection, draft);
+            if (failure != null) {
+                setClaimState(connection, draft.operationId(), "RELEASE_PENDING", failure);
+                connection.commit();
+                return claimResult(draft.operationId(), failure, null, false);
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO city_chunks(world_uuid, chunk_x, chunk_z, city_uuid, claimed_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, draft.target().worldId().toString());
+                insert.setInt(2, draft.target().x());
+                insert.setInt(3, draft.target().z());
+                insert.setString(4, draft.cityId().toString());
+                insert.setString(5, Instant.now().toString());
+                insert.executeUpdate();
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE cities SET revision=revision+1 WHERE city_uuid=? AND revision=? AND stage<>'SETTLEMENT'
+                    """)) {
+                update.setString(1, draft.cityId().toString());
+                update.setLong(2, draft.expectedRevision());
+                if (update.executeUpdate() != 1) throw new SQLException("City changed while claiming chunk");
+            }
+            setClaimState(connection, draft.operationId(), "DOMAIN_COMMITTED", CityClaimCode.CLAIMED);
+            CityView updated = readCity(connection, draft.cityId()).orElseThrow(() -> new SQLException("Claimed city disappeared"));
+            connection.commit();
+            return claimResult(draft.operationId(), CityClaimCode.CLAIMED, updated, false);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Void> markClaimCommitPending(UUID operationId) {
+        return async(() -> { updateClaimState(operationId, "DOMAIN_COMMITTED", "COMMIT_PENDING", CityClaimCode.UNKNOWN_OUTCOME); return null; });
+    }
+
+    @Override
+    public CompletionStage<CityClaimResult> completeClaim(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection()) {
+                connection.setAutoCommit(false);
+                ExistingOperation operation = findOperation(connection, operationId);
+                if (operation == null || !operation.type.equals("CLAIM_CHUNK")) {
+                    connection.commit();
+                    return claimResult(operationId, CityClaimCode.OPERATION_CONFLICT, null, true);
+                }
+                if (operation.state.equals("DOMAIN_COMMITTED") || operation.state.equals("COMMIT_PENDING")) {
+                    setClaimState(connection, operationId, "COMPLETED", CityClaimCode.CLAIMED);
+                    operation = findOperation(connection, operationId);
+                }
+                if (!operation.state.equals("COMPLETED")) {
+                    connection.commit();
+                    return claimResult(operationId, CityClaimCode.OPERATION_IN_PROGRESS, null, true);
+                }
+                CityView city = operation.cityId == null ? null : readCity(connection, UUID.fromString(operation.cityId)).orElse(null);
+                connection.commit();
+                return claimResult(operationId, city == null ? CityClaimCode.INTERNAL_ERROR : CityClaimCode.REPLAYED, city, true);
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<Void> failClaim(UUID operationId, CityClaimCode code) {
+        return async(() -> { updateClaimState(operationId, "PREPARED", "FAILED", code); return null; });
+    }
+
+    @Override
+    public CompletionStage<Void> markClaimReleasePending(UUID operationId, CityClaimCode code) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RELEASE_PENDING', result_code=?, updated_at=?
+                    WHERE operation_uuid=? AND operation_type='CLAIM_CHUNK' AND state IN ('PREPARED','RESERVED')
+                    """)) {
+                update.setString(1, code.name());
+                update.setString(2, Instant.now().toString());
+                update.setString(3, operationId.toString());
+                update.executeUpdate();
+                return null;
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<Void> markClaimReleased(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RELEASED', updated_at=?
+                    WHERE operation_uuid=? AND operation_type='CLAIM_CHUNK' AND state='RELEASE_PENDING'
+                    """)) {
+                update.setString(1, Instant.now().toString());
+                update.setString(2, operationId.toString());
+                update.executeUpdate();
+                return null;
+            }
+        });
+    }
+
+    private CityClaimCode claimFailure(Connection connection, CityClaimDraft draft) throws SQLException {
+        CityView city = readCity(connection, draft.cityId()).orElse(null);
+        if (city == null) return CityClaimCode.NOT_FOUND;
+        try (PreparedStatement query = connection.prepareStatement("SELECT role_id FROM city_members WHERE city_uuid=? AND player_uuid=?")) {
+            query.setString(1, draft.cityId().toString());
+            query.setString(2, draft.actorId().toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) return CityClaimCode.NOT_MEMBER;
+                if (!result.getString("role_id").equals("RULER")) return CityClaimCode.PERMISSION_DENIED;
+            }
+        }
+        if (city.revision() != draft.expectedRevision()) return CityClaimCode.STALE_REVISION;
+        if (city.stage() == CityStage.SETTLEMENT) return CityClaimCode.PROMOTION_REQUIRED;
+        if (city.chunks().size() >= city.stage().chunkLimit()) return CityClaimCode.CAP_REACHED;
+        if (city.chunks().contains(draft.target())) return CityClaimCode.ALREADY_OWNED;
+        if (city.chunks().stream().noneMatch(draft.target()::adjacentTo)) return CityClaimCode.DISCONNECTED;
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM city_chunks WHERE world_uuid=? AND chunk_x=? AND chunk_z=?
+                """)) {
+            query.setString(1, draft.target().worldId().toString());
+            query.setInt(2, draft.target().x());
+            query.setInt(3, draft.target().z());
+            try (ResultSet result = query.executeQuery()) { if (result.next()) return CityClaimCode.TARGET_UNAVAILABLE; }
+        }
+        return null;
+    }
+
+    private CityClaimResult claimReplay(Connection connection, CityClaimDraft draft, ExistingOperation operation,
+                                        String hash) throws SQLException {
+        if (!operation.type.equals("CLAIM_CHUNK") || !operation.requestHash.equals(hash)) {
+            connection.commit();
+            return claimResult(draft.operationId(), CityClaimCode.OPERATION_CONFLICT, null, true);
+        }
+        if (operation.state.equals("COMPLETED")) {
+            CityView city = operation.cityId == null ? null : readCity(connection, UUID.fromString(operation.cityId)).orElse(null);
+            connection.commit();
+            return claimResult(draft.operationId(), city == null ? CityClaimCode.INTERNAL_ERROR : CityClaimCode.REPLAYED, city, true);
+        }
+        if (operation.state.equals("FAILED") || operation.state.equals("RELEASED")) {
+            connection.commit();
+            return claimResult(draft.operationId(), parseClaimCode(operation.resultCode), null, true);
+        }
+        connection.commit();
+        return claimResult(draft.operationId(), CityClaimCode.OPERATION_IN_PROGRESS, null, true);
+    }
+
+    private void writeClaimOperation(Connection connection, CityClaimDraft draft, String hash, String payload,
+                                     String state, CityClaimCode code, String now) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO city_operations(operation_uuid, operation_type, request_hash, request_payload, state,
+                    result_code, city_uuid, actor_uuid, created_at, updated_at)
+                VALUES (?, 'CLAIM_CHUNK', ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, draft.operationId().toString()); insert.setString(2, hash); insert.setString(3, payload);
+            insert.setString(4, state); insert.setString(5, code.name()); insert.setString(6, draft.cityId().toString());
+            insert.setString(7, draft.actorId().toString()); insert.setString(8, now); insert.setString(9, now);
+            insert.executeUpdate();
+        }
+    }
+
+    private String claimPayload(CityClaimDraft draft) {
+        return draft.cityId() + "\n" + draft.actorId() + "\n" + draft.expectedRevision() + "\n"
+                + draft.target().worldId() + "\n" + draft.target().x() + "\n" + draft.target().z() + "\n" + draft.price();
+    }
+
+    private CityClaimCode parseClaimCode(String value) {
+        try { return CityClaimCode.valueOf(value); }
+        catch (IllegalArgumentException invalid) { return CityClaimCode.INTERNAL_ERROR; }
+    }
+
+    private CityClaimResult claimResult(UUID operationId, CityClaimCode code, CityView city, boolean replay) {
+        Optional<CityView> view = code == CityClaimCode.CLAIMED || code == CityClaimCode.REPLAYED
+                ? Optional.ofNullable(city) : Optional.empty();
+        if (view.isEmpty() && (code == CityClaimCode.CLAIMED || code == CityClaimCode.REPLAYED)) code = CityClaimCode.INTERNAL_ERROR;
+        return new CityClaimResult(operationId, code, view, replay);
+    }
+
+    private void setClaimState(Connection connection, UUID operationId, String state, CityClaimCode code) throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE city_operations SET state=?, result_code=?, updated_at=?
+                WHERE operation_uuid=? AND operation_type='CLAIM_CHUNK'
+                """)) {
+            update.setString(1, state); update.setString(2, code.name()); update.setString(3, Instant.now().toString());
+            update.setString(4, operationId.toString());
+            if (update.executeUpdate() != 1) throw new SQLException("Claim journal entry disappeared");
+        }
+    }
+
+    private void updateClaimState(UUID operationId, String expected, String state, CityClaimCode code) throws SQLException {
+        try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                UPDATE city_operations SET state=?, result_code=?, updated_at=?
+                WHERE operation_uuid=? AND operation_type='CLAIM_CHUNK' AND state=?
+                """)) {
+            update.setString(1, state); update.setString(2, code.name()); update.setString(3, Instant.now().toString());
+            update.setString(4, operationId.toString()); update.setString(5, expected); update.executeUpdate();
+        }
     }
 
     private CityPromotionCode promotionFailure(Connection connection, CityPromotionDraft draft) throws SQLException {

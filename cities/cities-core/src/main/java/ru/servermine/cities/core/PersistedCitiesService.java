@@ -4,6 +4,7 @@ import ru.servermine.cities.api.CitiesService;
 import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.api.CityFoundingService;
 import ru.servermine.cities.api.CityProgressionService;
+import ru.servermine.cities.api.CityTerritoryService;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -16,21 +17,28 @@ public final class PersistedCitiesService implements CitiesService {
     private final CityRepository repository;
     private final CityFoundingService foundingService;
     private final CityProgressionService progressionService;
+    private final CityTerritoryService territoryService;
     private volatile boolean ready = true;
 
     public PersistedCitiesService(CityRepository repository) {
-        this(repository, null);
+        this(repository, null, null, null);
     }
 
     public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService) {
-        this(repository, foundingService, null);
+        this(repository, foundingService, null, null);
     }
 
     public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService,
                                   CityProgressionService progressionService) {
+        this(repository, foundingService, progressionService, null);
+    }
+
+    public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService,
+                                  CityProgressionService progressionService, CityTerritoryService territoryService) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.foundingService = foundingService;
         this.progressionService = progressionService;
+        this.territoryService = territoryService;
     }
 
     public String apiVersion() {
@@ -49,6 +57,11 @@ public final class PersistedCitiesService implements CitiesService {
     @Override
     public Optional<CityProgressionService> progressionService() {
         return ready ? Optional.ofNullable(progressionService) : Optional.empty();
+    }
+
+    @Override
+    public Optional<CityTerritoryService> territoryService() {
+        return ready ? Optional.ofNullable(territoryService) : Optional.empty();
     }
 
     public void deactivate() {

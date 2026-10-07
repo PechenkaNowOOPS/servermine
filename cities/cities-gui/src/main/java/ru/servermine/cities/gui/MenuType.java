@@ -4,6 +4,7 @@ public enum MenuType {
     MAIN('\uE001', "Главное меню"),
     TERRITORY('\uE002', "Территория"),
     PURCHASE('\uE003', "Покупка территории"),
+    PURCHASE_CONFIRM('\u0000', "Подтверждение покупки чанка"),
     UPGRADES('\uE004', "Улучшения"),
     TREASURY('\uE005', "Казна"),
     RESIDENTS('\uE006', "Жители"),

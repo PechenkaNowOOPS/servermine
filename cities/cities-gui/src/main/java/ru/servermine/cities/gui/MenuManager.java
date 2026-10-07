@@ -6,6 +6,9 @@ import ru.servermine.cities.api.CityFoundationCode;
 import ru.servermine.cities.api.CityFoundationRequest;
 import ru.servermine.cities.api.CityFoundingService;
 import ru.servermine.cities.api.CityProgressionService;
+import ru.servermine.cities.api.CityTerritoryService;
+import ru.servermine.cities.api.CityClaimCode;
+import ru.servermine.cities.api.CityClaimRequest;
 import ru.servermine.cities.api.CityPromotionCode;
 import ru.servermine.cities.api.CityPromotionRequest;
 import ru.servermine.cities.api.CityPromotionResult;
@@ -41,8 +44,11 @@ public final class MenuManager {
     private final java.util.Map<java.util.UUID, java.util.UUID> requests = new java.util.HashMap<>();
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingFounding> pendingFounding = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingPromotion> pendingPromotions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentMap<java.util.UUID, PendingClaim> pendingClaims = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<java.util.UUID, java.util.UUID> cityIds = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, CitySnapshot> cityViews = new java.util.HashMap<>();
+    private final java.util.Map<java.util.UUID, List<ChunkPosition>> purchaseTargets = new java.util.HashMap<>();
+    private final java.util.Map<java.util.UUID, Integer> purchasePages = new java.util.HashMap<>();
 
     public MenuManager(JavaPlugin plugin, CitiesService cities) {
         this.plugin = plugin;
@@ -55,8 +61,11 @@ public final class MenuManager {
         forget(player);
         pendingFounding.remove(player.getUniqueId());
         pendingPromotions.remove(player.getUniqueId());
+        pendingClaims.remove(player.getUniqueId());
         cityIds.remove(player.getUniqueId());
         cityViews.remove(player.getUniqueId());
+        purchaseTargets.remove(player.getUniqueId());
+        purchasePages.remove(player.getUniqueId());
     }
 
     public boolean isAwaitingCityName(java.util.UUID playerId) {
@@ -123,6 +132,8 @@ public final class MenuManager {
                     new CitySnapshot.ResidentEntry("Witch", "Временный заместитель")));
         cityIds.remove(player.getUniqueId());
         cityViews.remove(player.getUniqueId());
+        purchaseTargets.remove(player.getUniqueId());
+        purchasePages.remove(player.getUniqueId());
         show(player, type, city, true, null);
     }
 
@@ -139,7 +150,7 @@ public final class MenuManager {
         MenuHolder holder = new MenuHolder(MenuSession.create(player.getUniqueId(), type, city.revision(), preview));
         Inventory inventory = Bukkit.createInventory(holder, 54, title(type, preview));
         holder.bind(inventory);
-        render(inventory, type, city);
+        render(inventory, type, city, player.getUniqueId(), preview);
         if (preview) inventory.setItem(0, button(Material.BARRIER, "Макет интерфейса", "Все данные демонстрационные. Покупки отключены."));
         player.openInventory(inventory);
     }
@@ -158,11 +169,12 @@ public final class MenuManager {
                 .append(Component.text("  Градострой — " + type.fallbackTitle(), NamedTextColor.DARK_GRAY).font(DEFAULT_FONT));
     }
 
-    private void render(Inventory inv, MenuType type, CitySnapshot city) {
+    private void render(Inventory inv, MenuType type, CitySnapshot city, UUID playerId, boolean preview) {
         switch (type) {
             case MAIN -> renderMain(inv, city);
             case TERRITORY -> renderTerritory(inv, city);
-            case PURCHASE -> renderPurchase(inv, city);
+            case PURCHASE -> renderPurchase(inv, city, playerId, preview);
+            case PURCHASE_CONFIRM -> renderClaimConfirm(inv, city, playerId, preview);
             case UPGRADES -> renderUpgrades(inv, city);
             case TREASURY -> renderTreasury(inv, city);
             case RESIDENTS -> renderResidents(inv, city);
@@ -386,17 +398,56 @@ public final class MenuManager {
         inv.setItem(45, back());
     }
 
-    private void renderPurchase(Inventory inv, CitySnapshot c) {
-        int price = chunkPrice();
-        inv.setItem(13, button(Material.GRASS_BLOCK, "Соседний чанк",
-                "Координаты выбираются территориальным модулем.",
-                "Предпросмотр. Покупки ещё не подключены."));
-        inv.setItem(22, button(Material.GOLD_INGOT, "Стоимость: " + money(price),
-                "Казна: " + money(c.treasury()),
-                "После покупки: " + Math.min(c.territory() + 1, c.territoryLimit()) + " / " + c.territoryLimit()));
-        inv.setItem(38, button(Material.LIME_CONCRETE, "Покупка недоступна", "Ожидает подключения доменных сервисов"));
-        inv.setItem(42, button(Material.RED_CONCRETE, "Отмена", "Вернуться к территории"));
-        inv.setItem(45, back());
+    private void renderPurchase(Inventory inv, CitySnapshot c, UUID playerId, boolean preview) {
+        CityTerritoryService service = cities.territoryService().orElse(null);
+        long price = service == null ? chunkPrice() : service.chunkPrice();
+        inv.setItem(4, button(Material.GOLD_INGOT, "Цена за чанк: " + money(price),
+                "Город: " + c.territory() + " / " + c.territoryLimit() + " чанков"));
+        List<ChunkPosition> targets = preview ? List.of() : purchaseTargets.getOrDefault(playerId, List.of());
+        int page = purchasePages.getOrDefault(playerId, 0);
+        int start = page * purchaseSlots().length;
+        int end = Math.min(targets.size(), start + purchaseSlots().length);
+        int[] slots = purchaseSlots();
+        for (int index = start; index < end; index++) {
+            ChunkPosition target = targets.get(index);
+            org.bukkit.World world = Bukkit.getWorld(target.worldId());
+            String worldName = world == null ? target.worldId().toString().substring(0, 8) : world.getName();
+            inv.setItem(slots[index - start], button(Material.GRASS_BLOCK,
+                    "Чанк X " + target.x() + ", Z " + target.z(), worldName,
+                    "Свободен и соседствует с городом.", "Нажмите, чтобы проверить и подтвердить покупку."));
+        }
+        if (targets.isEmpty()) {
+            inv.setItem(22, button(Material.BARRIER, "Нет доступных чанков",
+                    "Проверьте этап, лимит территории, границу мира и системные зоны."));
+        }
+        if (page > 0) inv.setItem(48, button(Material.ARROW, "Предыдущая страница"));
+        if (end < targets.size()) inv.setItem(50, button(Material.ARROW, "Следующая страница"));
+        inv.setItem(45, button(Material.ARROW, "Назад", "Вернуться к территории"));
+    }
+
+    private void renderClaimConfirm(Inventory inv, CitySnapshot city, UUID playerId, boolean preview) {
+        PendingClaim pending = preview ? null : pendingClaims.get(playerId);
+        if (pending == null) {
+            inv.setItem(22, button(Material.BARRIER, "Покупка недоступна", "Выберите чанк на предыдущем экране."));
+            inv.setItem(45, back());
+            return;
+        }
+        CityTerritoryService service = cities.territoryService().orElse(null);
+        long price = service == null ? chunkPrice() : service.chunkPrice();
+        org.bukkit.World world = Bukkit.getWorld(pending.target.worldId());
+        String worldName = world == null ? pending.target.worldId().toString() : world.getName();
+        inv.setItem(13, button(Material.GRASS_BLOCK, "Покупка соседнего чанка",
+                "Мир: " + worldName, "Координаты: X " + pending.target.x() + ", Z " + pending.target.z(),
+                "Текущая территория: " + city.territory() + " / " + city.territoryLimit(),
+                "После покупки: " + (city.territory() + 1) + " / " + city.territoryLimit(),
+                "Стоимость: " + money(price), "Оплата: ваши физические монеты."));
+        inv.setItem(29, button(Material.LIME_CONCRETE, "Подтвердить покупку", "Чанк закрепится за городом после оплаты."));
+        inv.setItem(33, button(Material.RED_CONCRETE, "Отмена", "Вернуться к выбору чанка."));
+        inv.setItem(45, button(Material.ARROW, "Назад", "Вернуться к выбору чанка."));
+    }
+
+    private int[] purchaseSlots() {
+        return new int[]{10,11,12,13,14,15,16,19,20,21,22,23,24,25,28,29,30,31,32,33,34};
     }
 
     private void renderUpgrades(Inventory inv, CitySnapshot c) {
@@ -458,14 +509,21 @@ public final class MenuManager {
             return;
         }
         MenuType target = null;
-        if (rawSlot == 45) target = MenuType.MAIN;
+        if (rawSlot == 45) target = switch (session.menuType()) {
+            case PURCHASE -> MenuType.TERRITORY;
+            case PURCHASE_CONFIRM -> MenuType.PURCHASE;
+            default -> MenuType.MAIN;
+        };
         else if (session.menuType() == MenuType.MAIN) target = switch (rawSlot) {
             case 20 -> MenuType.TERRITORY; case 24 -> MenuType.RESIDENTS;
             case 29 -> MenuType.UPGRADES; case 33 -> MenuType.MANAGEMENT;
             case 38 -> MenuType.TREASURY; case 42 -> MenuType.DIPLOMACY;
             case 49 -> MenuType.MARKET; default -> null;
         };
-        else if (session.menuType() == MenuType.TERRITORY && rawSlot == 40) target = MenuType.PURCHASE;
+        else if (session.menuType() == MenuType.TERRITORY && rawSlot == 40) {
+            if (session.preview()) openPreview(player, MenuType.PURCHASE); else openPurchaseTargets(player);
+            return;
+        }
         else if (session.menuType() == MenuType.PURCHASE && rawSlot == 42) target = MenuType.TERRITORY;
         else if (session.menuType() == MenuType.MANAGEMENT && rawSlot == 41) target = MenuType.PROGRESSION;
         if (target != null) {
@@ -484,13 +542,127 @@ public final class MenuManager {
         } else if (session.menuType() == MenuType.PROMOTION_CONFIRM && rawSlot == 33) {
             pendingPromotions.remove(player.getUniqueId());
             open(player, MenuType.PROGRESSION);
+        } else if (session.menuType() == MenuType.PURCHASE && (rawSlot == 48 || rawSlot == 50)) {
+            int page = purchasePages.getOrDefault(player.getUniqueId(), 0);
+            int maximum = Math.max(0, (purchaseTargets.getOrDefault(player.getUniqueId(), List.of()).size() - 1)
+                    / purchaseSlots().length);
+            purchasePages.put(player.getUniqueId(), Math.max(0, Math.min(maximum, page + (rawSlot == 50 ? 1 : -1))));
+            open(player, MenuType.PURCHASE);
+        } else if (session.menuType() == MenuType.PURCHASE && candidateSlot(rawSlot)) {
+            beginClaim(player, session, rawSlot);
+        } else if (session.menuType() == MenuType.PURCHASE_CONFIRM && rawSlot == 29) {
+            confirmClaim(player);
+        } else if (session.menuType() == MenuType.PURCHASE_CONFIRM && rawSlot == 33) {
+            pendingClaims.remove(player.getUniqueId());
+            open(player, MenuType.PURCHASE);
         } else {
             player.sendMessage(Component.text("Этот раздел пока доступен только для просмотра.", NamedTextColor.YELLOW));
         }
     }
 
-    private int chunkPrice() {
-        return Math.max(0, plugin.getConfig().getInt("territory.chunk-price", 750));
+    private void openPurchaseTargets(Player player) {
+        CityTerritoryService service = cities.territoryService().orElse(null);
+        UUID cityId = cityIds.get(player.getUniqueId());
+        if (service == null || !service.isReady() || cityId == null) {
+            player.sendMessage(Component.text("Покупка территории сейчас недоступна.", NamedTextColor.RED));
+            return;
+        }
+        UUID requestId = UUID.randomUUID();
+        requests.put(player.getUniqueId(), requestId);
+        player.sendMessage(Component.text("Ищу свободные соседние чанки…", NamedTextColor.YELLOW));
+        service.availableTargets(cityId).whenComplete((targets, error) -> {
+            if (!plugin.isEnabled()) return;
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!player.isOnline() || !requestId.equals(requests.get(player.getUniqueId()))) return;
+                requests.remove(player.getUniqueId());
+                if (error != null) {
+                    plugin.getLogger().warning("Cannot list city claim targets: " + error);
+                    player.sendMessage(Component.text("Не удалось загрузить соседние чанки.", NamedTextColor.RED));
+                    return;
+                }
+                purchaseTargets.put(player.getUniqueId(), targets);
+                purchasePages.put(player.getUniqueId(), 0);
+                open(player, MenuType.PURCHASE);
+            });
+        });
+    }
+
+    private boolean candidateSlot(int rawSlot) {
+        for (int slot : purchaseSlots()) if (slot == rawSlot) return true;
+        return false;
+    }
+
+    private void beginClaim(Player player, MenuSession session, int rawSlot) {
+        List<ChunkPosition> targets = purchaseTargets.getOrDefault(player.getUniqueId(), List.of());
+        int index = purchasePages.getOrDefault(player.getUniqueId(), 0) * purchaseSlots().length;
+        int[] slots = purchaseSlots();
+        for (int i = 0; i < slots.length; i++) {
+            if (slots[i] == rawSlot) { index += i; break; }
+        }
+        if (index >= targets.size()) return;
+        UUID cityId = cityIds.get(player.getUniqueId());
+        if (cityId == null) {
+            player.sendMessage(Component.text("Город не найден. Откройте книгу заново.", NamedTextColor.RED));
+            return;
+        }
+        pendingClaims.put(player.getUniqueId(), new PendingClaim(UUID.randomUUID(), cityId, targets.get(index), session.cityRevision()));
+        open(player, MenuType.PURCHASE_CONFIRM);
+    }
+
+    private void confirmClaim(Player player) {
+        PendingClaim pending = pendingClaims.remove(player.getUniqueId());
+        CityTerritoryService service = cities.territoryService().orElse(null);
+        if (pending == null || service == null || !service.isReady()) {
+            player.sendMessage(Component.text("Покупка территории сейчас недоступна.", NamedTextColor.RED));
+            return;
+        }
+        player.closeInventory();
+        player.sendMessage(Component.text("Проверяю участок и резервирую оплату…", NamedTextColor.YELLOW));
+        CityClaimRequest request = new CityClaimRequest(pending.operationId, pending.cityId,
+                player.getUniqueId(), pending.revision, pending.target);
+        service.purchase(request).whenComplete((result, error) -> {
+            if (!plugin.isEnabled()) return;
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!player.isOnline()) return;
+                if (error != null) {
+                    player.sendMessage(Component.text("Не удалось подтвердить результат покупки. Не повторяйте оплату; обратитесь к администратору.", NamedTextColor.RED));
+                    plugin.getLogger().warning("City chunk claim failed for operation " + pending.operationId + ": " + error);
+                } else if (result.code() == CityClaimCode.CLAIMED || result.code() == CityClaimCode.REPLAYED) {
+                    String paid = service.chunkPrice() == 0 ? "Бесплатно." : "Списано: " + money(service.chunkPrice()) + ".";
+                    player.sendMessage(Component.text("Чанк закреплён за городом. " + paid, NamedTextColor.GREEN));
+                    open(player, MenuType.TERRITORY);
+                } else {
+                    player.sendMessage(Component.text(claimMessage(result.code()), NamedTextColor.RED));
+                    open(player, MenuType.TERRITORY);
+                }
+            });
+        });
+    }
+
+    private String claimMessage(CityClaimCode code) {
+        return switch (code) {
+            case NOT_FOUND -> "Город не найден.";
+            case NOT_MEMBER -> "Вы не состоите в этом городе.";
+            case PERMISSION_DENIED -> "Покупать территорию может только правитель города.";
+            case PROMOTION_REQUIRED -> "Сначала повысьте этап города до Деревни.";
+            case STALE_REVISION -> "Город изменился. Откройте книгу и выберите чанк заново.";
+            case CAP_REACHED -> "Лимит территории этого этапа достигнут.";
+            case ALREADY_OWNED -> "Этот чанк уже принадлежит вашему городу.";
+            case TARGET_UNAVAILABLE -> "Чанк недоступен или уже занят другим городом.";
+            case PROTECTED_ZONE -> "Этот чанк находится в защищённой зоне.";
+            case DISCONNECTED -> "Выберите чанк рядом с существующей территорией города.";
+            case INSUFFICIENT_FUNDS -> "Недостаточно физических монет.";
+            case ECONOMY_UNAVAILABLE -> "Экономика сейчас недоступна.";
+            case OPERATION_CONFLICT -> "Операция конфликтует с предыдущим запросом.";
+            case OPERATION_IN_PROGRESS, UNKNOWN_OUTCOME -> "Покупка ещё не подтверждена. Не повторяйте оплату; обратитесь к администратору.";
+            case SERVICE_UNAVAILABLE -> "Сервис территории сейчас недоступен.";
+            case INTERNAL_ERROR -> "Не удалось купить чанк из-за внутренней ошибки.";
+            case CLAIMED, REPLAYED -> "Чанк куплен.";
+        };
+    }
+
+    private long chunkPrice() {
+        return Math.max(0, plugin.getConfig().getLong("territory.chunk-price", 750));
     }
 
     private static String money(long value) {
@@ -519,4 +691,6 @@ public final class MenuManager {
     }
 
     private record PendingPromotion(UUID operationId, UUID cityId, CityStage expectedStage, long revision) { }
+
+    private record PendingClaim(UUID operationId, UUID cityId, ChunkPosition target, long revision) { }
 }
