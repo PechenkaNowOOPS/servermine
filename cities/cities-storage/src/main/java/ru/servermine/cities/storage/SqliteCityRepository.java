@@ -10,6 +10,8 @@ import ru.servermine.cities.api.CityPromotionCode;
 import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.api.CityClaimCode;
 import ru.servermine.cities.api.CityClaimResult;
+import ru.servermine.cities.api.CityLeaveCode;
+import ru.servermine.cities.api.CityLeaveResult;
 import ru.servermine.cities.core.CityRepository;
 import ru.servermine.cities.core.CityPromotionDraft;
 import ru.servermine.cities.core.CityClaimDraft;
@@ -189,6 +191,79 @@ public final class SqliteCityRepository implements CityRepository {
                 return List.copyOf(cities);
             }
         });
+    }
+
+    @Override
+    public CompletionStage<CityLeaveResult> leaveCity(UUID playerId) {
+        return async(() -> leaveCityTransaction(playerId));
+    }
+
+    private CityLeaveResult leaveCityTransaction(UUID playerId) throws SQLException {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                UUID cityId = null;
+                String role = null;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT city_uuid, role_id FROM city_members WHERE player_uuid = ?")) {
+                    query.setString(1, playerId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next()) {
+                            cityId = UUID.fromString(result.getString("city_uuid"));
+                            role = result.getString("role_id");
+                        }
+                    }
+                }
+                if (cityId == null) {
+                    connection.commit();
+                    return new CityLeaveResult(CityLeaveCode.NOT_IN_CITY, Optional.empty(), Optional.empty());
+                }
+
+                UUID newRulerId = null;
+                if ("RULER".equals(role)) {
+                    try (PreparedStatement query = connection.prepareStatement("""
+                            SELECT player_uuid FROM city_members
+                            WHERE city_uuid = ? AND player_uuid <> ?
+                            ORDER BY joined_at, player_uuid LIMIT 1
+                            """)) {
+                        query.setString(1, cityId.toString());
+                        query.setString(2, playerId.toString());
+                        try (ResultSet result = query.executeQuery()) {
+                            if (result.next()) newRulerId = UUID.fromString(result.getString("player_uuid"));
+                        }
+                    }
+                    if (newRulerId == null) {
+                        connection.rollback();
+                        return new CityLeaveResult(CityLeaveCode.LAST_RULER, Optional.empty(), Optional.empty());
+                    }
+                    try (PreparedStatement update = connection.prepareStatement(
+                            "UPDATE city_members SET role_id = 'RULER' WHERE city_uuid = ? AND player_uuid = ?")) {
+                        update.setString(1, cityId.toString());
+                        update.setString(2, newRulerId.toString());
+                        if (update.executeUpdate() != 1) throw new SQLException("Successor membership changed during departure");
+                    }
+                }
+
+                try (PreparedStatement delete = connection.prepareStatement(
+                        "DELETE FROM city_members WHERE city_uuid = ? AND player_uuid = ?")) {
+                    delete.setString(1, cityId.toString());
+                    delete.setString(2, playerId.toString());
+                    if (delete.executeUpdate() != 1) throw new SQLException("Membership changed during departure");
+                }
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE cities SET revision = revision + 1 WHERE city_uuid = ?")) {
+                    update.setString(1, cityId.toString());
+                    if (update.executeUpdate() != 1) throw new SQLException("City disappeared during departure");
+                }
+                CityView city = readCity(connection, cityId).orElseThrow(
+                        () -> new SQLException("City disappeared after member departure"));
+                connection.commit();
+                return new CityLeaveResult(CityLeaveCode.LEFT, Optional.of(city), Optional.ofNullable(newRulerId));
+            } catch (SQLException | RuntimeException error) {
+                connection.rollback();
+                throw error;
+            }
+        }
     }
 
     @Override

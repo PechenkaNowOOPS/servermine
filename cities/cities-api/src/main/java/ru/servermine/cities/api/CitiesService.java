@@ -25,4 +25,9 @@ public interface CitiesService {
     default Optional<CityTerritoryService> territoryService() {
         return Optional.empty();
     }
+
+    /** Optional membership lifecycle, including a player's own departure from a city. */
+    default Optional<CityMembershipService> membershipService() {
+        return Optional.empty();
+    }
 }

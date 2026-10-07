@@ -5,6 +5,7 @@ import ru.servermine.cities.api.CityFoundationDraft;
 import ru.servermine.cities.api.CityFoundationResult;
 import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.api.CityClaimResult;
+import ru.servermine.cities.api.CityLeaveResult;
 
 import java.util.Optional;
 import java.util.List;
@@ -19,6 +20,8 @@ public interface CityRepository {
     CompletionStage<Optional<CityView>> findForPlayer(UUID playerId);
 
     CompletionStage<List<CityView>> findAllCities();
+
+    CompletionStage<CityLeaveResult> leaveCity(UUID playerId);
 
     CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft);
 

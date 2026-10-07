@@ -14,6 +14,7 @@ import ru.servermine.cities.protection.CityProtectionListener;
 import ru.servermine.cities.progression.CityProgressionServiceImpl;
 import ru.servermine.cities.progression.StagePromotionPolicy;
 import ru.servermine.cities.territory.CityTerritoryServiceImpl;
+import ru.servermine.cities.members.CityMembershipServiceImpl;
 import ru.servermine.cities.admin.CitiesAdminCommand;
 import ru.servermine.cities.gui.*;
 import ru.servermine.economy.api.EconomyService;
@@ -30,6 +31,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
     private CityFoundingServiceImpl cityFoundingService;
     private CityProgressionServiceImpl cityProgressionService;
     private CityTerritoryServiceImpl cityTerritoryService;
+    private CityMembershipServiceImpl cityMembershipService;
 
     @Override public void onEnable() {
         try {
@@ -56,8 +58,9 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
                     getConfig().getLong("territory.chunk-price", 750),
                     target -> protection.checkTarget(target).thenApply(decision -> decision == ru.servermine.cities.protection.FoundationDecision.ALLOWED),
                     protection::checkTargets, protectionIndex::replaceCity);
+            cityMembershipService = new CityMembershipServiceImpl(repository, protectionIndex::replaceCity);
             citiesService = new PersistedCitiesService(repository, cityFoundingService, cityProgressionService,
-                    cityTerritoryService);
+                    cityTerritoryService, cityMembershipService);
             getServer().getServicesManager().register(CitiesService.class, citiesService, this, ServicePriority.Normal);
             CityBookService books = new CityBookService(this);
             MenuManager menus = new MenuManager(this, citiesService);
@@ -65,7 +68,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new CityProtectionListener(this, protectionIndex), this);
             getLogger().info("City protection cache loaded: " + protectionIndex.claimCount() + " claimed chunks.");
             Objects.requireNonNull(getCommand("smcities"), "smcities command is missing")
-                    .setExecutor(new CitiesAdminCommand(citiesService, books, menus));
+                    .setExecutor(new CitiesAdminCommand(this, citiesService, books, menus));
 
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
             getLogger().info("City founding, configured progression, and territory purchase services are ready.");
@@ -79,6 +82,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
     @Override public void onDisable() {
         if (cityProgressionService != null) cityProgressionService.deactivate();
         if (cityTerritoryService != null) cityTerritoryService.deactivate();
+        if (cityMembershipService != null) cityMembershipService.deactivate();
         if (cityFoundingService != null) cityFoundingService.deactivate();
         if (citiesService != null) citiesService.deactivate();
         getServer().getServicesManager().unregisterAll(this);
