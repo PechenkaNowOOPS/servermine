@@ -49,7 +49,7 @@ final class InventoryMoneyEngine {
             CurrencyCodec.Inspection inspection = codec.inspect(item);
             long value = inspection.denomination().value();
             long missing = amount - removed;
-            int needed = (int) Math.min(item.getAmount(), Math.max(1L, (missing + value - 1) / value));
+            int needed = (int) Math.min(item.getAmount(), 1 + (missing - 1) / value);
             removed = Math.addExact(removed, Math.multiplyExact(value, needed));
             int left = item.getAmount() - needed;
             if (left == 0) working[slot] = null;
@@ -66,9 +66,10 @@ final class InventoryMoneyEngine {
         PlayerInventory inventory = player.getInventory();
         ItemStack[] working = cloneContents(inventory.getStorageContents());
         long before = balance(working);
+        long after = Math.addExact(before, amount);
         if (!addMoney(working, amount)) return new Mutation(MutationCode.INVENTORY_FULL, before, before);
         inventory.setStorageContents(working);
-        return new Mutation(MutationCode.OK, before, Math.addExact(before, amount));
+        return new Mutation(MutationCode.OK, before, after);
     }
 
     private long balance(ItemStack[] contents) {

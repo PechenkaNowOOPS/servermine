@@ -6,11 +6,12 @@ dependencies {
     testImplementation("org.xerial:sqlite-jdbc:" + property("sqliteVersion"))
     testImplementation("org.mockito:mockito-core:5.20.0")
 }
+val pluginProperties = mapOf("version" to version.toString(), "sqliteVersion" to property("sqliteVersion").toString())
 tasks.processResources {
-    inputs.property("version", project.version)
-    inputs.property("sqliteVersion", project.property("sqliteVersion"))
-    filesMatching("plugin.yml") { expand(mapOf("version" to project.version, "sqliteVersion" to project.property("sqliteVersion"))) }
+    inputs.properties(pluginProperties)
+    filesMatching("plugin.yml") { expand(pluginProperties) }
 }
+tasks.test { jvmArgs("--enable-native-access=ALL-UNNAMED") }
 tasks.jar {
     archiveBaseName.set("ServerMineEconomy")
     from(project(":economy:economy-api").extensions.getByType<SourceSetContainer>()["main"].output)

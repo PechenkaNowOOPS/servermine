@@ -15,6 +15,7 @@ import java.util.concurrent.ExecutorService;
 final class OperationRepository implements AutoCloseable {
     enum PrepareStatus { CREATED, EXISTING_SAME, CONFLICT }
     record PrepareResult(PrepareStatus status, OperationRecord record) {}
+    record TransitionResult(boolean applied, OperationRecord record) {}
 
     private final String jdbcUrl;
     private final int busyTimeoutMs;
@@ -128,6 +129,14 @@ final class OperationRepository implements AutoCloseable {
             long balanceBefore,
             long balanceAfter
     ) {
+        return tryTransition(operationId, expected, next, code, balanceBefore, balanceAfter)
+                .thenApply(TransitionResult::record);
+    }
+
+    CompletableFuture<TransitionResult> tryTransition(
+            UUID operationId, OperationState expected, OperationState next,
+            ResultCode code, long balanceBefore, long balanceAfter
+    ) {
         return CompletableFuture.supplyAsync(() -> {
             try (Connection connection = connection()) {
                 try (PreparedStatement ps = connection.prepareStatement("""
@@ -144,10 +153,11 @@ final class OperationRepository implements AutoCloseable {
                     ps.setString(7, expected.name());
                     int changed = ps.executeUpdate();
                     if (changed != 1) {
-                        return find(connection, operationId).orElseThrow(() -> new IllegalStateException("Operation disappeared: " + operationId));
+                        return new TransitionResult(false, find(connection, operationId)
+                                .orElseThrow(() -> new IllegalStateException("Operation disappeared: " + operationId)));
                     }
                 }
-                return find(connection, operationId).orElseThrow();
+                return new TransitionResult(true, find(connection, operationId).orElseThrow());
             } catch (SQLException e) {
                 throw new RuntimeException(e);
             }

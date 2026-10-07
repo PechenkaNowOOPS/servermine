@@ -143,8 +143,12 @@ final class EconomyServiceImpl implements EconomyService {
             if (row.state() != OperationState.RESERVED) {
                 return CompletableFuture.completedFuture(simple(operationId, ResultCode.INVALID_OPERATION_STATE, row.state(), row.amount(), "Expected RESERVED"));
             }
-            return operations.transition(operationId, OperationState.RESERVED, OperationState.COMMITTED, ResultCode.OK,
-                    row.balanceBefore(), row.balanceAfter()).thenApply(updated -> result(updated, false));
+            return operations.tryTransition(operationId, OperationState.RESERVED, OperationState.COMMITTED, ResultCode.OK,
+                    row.balanceBefore(), row.balanceAfter()).thenApply(transition -> {
+                        OperationRecord updated = transition.record();
+                        if (updated.state() == OperationState.COMMITTED) return result(updated, !transition.applied());
+                        return simple(operationId, ResultCode.INVALID_OPERATION_STATE, updated.state(), updated.amount(), "Reservation changed concurrently");
+                    });
         }).exceptionally(ex -> simple(operationId, ResultCode.INTERNAL_ERROR, OperationState.UNKNOWN, 0, rootMessage(ex)));
     }
 
@@ -160,9 +164,15 @@ final class EconomyServiceImpl implements EconomyService {
                 return CompletableFuture.completedFuture(simple(operationId, ResultCode.INVALID_OPERATION_STATE, row.state(), row.amount(), "Expected RESERVED"));
             }
 
-            return operations.transition(operationId, OperationState.RESERVED, OperationState.RELEASING, ResultCode.OK,
-                    row.balanceBefore(), row.balanceAfter()).thenCompose(releasing ->
-                    mainThread.call(() -> {
+            return operations.tryTransition(operationId, OperationState.RESERVED, OperationState.RELEASING, ResultCode.OK,
+                    row.balanceBefore(), row.balanceAfter()).thenCompose(transition -> {
+                    OperationRecord releasing = transition.record();
+                    if (!transition.applied()) {
+                        if (releasing.state() == OperationState.RELEASED) return CompletableFuture.completedFuture(result(releasing, true));
+                        return CompletableFuture.completedFuture(simple(operationId, ResultCode.INVALID_OPERATION_STATE,
+                                releasing.state(), releasing.amount(), "Another request owns the reservation transition"));
+                    }
+                    return mainThread.call(() -> {
                         Player player = Bukkit.getPlayer(releasing.playerId());
                         if (player == null || !player.isOnline()) return new PlayerMutation(null, ResultCode.PLAYER_OFFLINE);
                         InventoryMoneyEngine.Mutation mutation = moneyEngine.payout(player, releasing.amount());
@@ -187,7 +197,8 @@ final class EconomyServiceImpl implements EconomyService {
                                     }
                                     return result(updated, false);
                                 });
-                    })
+                    });
+                }
             );
         }).exceptionally(ex -> simple(operationId, ResultCode.INTERNAL_ERROR, OperationState.UNKNOWN, 0, rootMessage(ex)));
     }
