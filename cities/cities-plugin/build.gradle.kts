@@ -18,9 +18,10 @@ dependencies {
     implementation(project(":cities:cities-admin"))
     compileOnly(project(":economy:economy-api"))
 }
+val pluginVersion = version.toString()
 tasks.processResources {
-    inputs.property("version", project.version)
-    filesMatching("plugin.yml") { expand(mapOf("version" to project.version)) }
+    inputs.property("version", pluginVersion)
+    filesMatching("plugin.yml") { expand(mapOf("version" to pluginVersion)) }
 }
 tasks.jar {
     archiveBaseName.set("ServerMineCities")

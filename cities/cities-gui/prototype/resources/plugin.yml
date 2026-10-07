@@ -1,0 +1,15 @@
+name: GradostroyGUI
+version: 0.1.0-SNAPSHOT
+main: ru.servermine.gradostroygui.GradostroyGuiPlugin
+api-version: '26.2'
+authors: [ServerMine]
+description: GUI-прототип книги управления городом для Server Mine.
+commands:
+  gradostroygui:
+    description: Административные команды GUI Градостроя
+    usage: /gradostroygui <givebook|open|reload|setdemo>
+    permission: gradostroy.admin
+permissions:
+  gradostroy.admin:
+    description: Администрирование GradostroyGUI
+    default: op
