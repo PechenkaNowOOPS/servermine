@@ -21,6 +21,7 @@ local.properties
 **/*.sqlite
 **/*.sqlite3
 **/*.sqlite-*
+**/*.sqlite3-*
 **/plugins/
 **/logs/
 **/crash-reports/
