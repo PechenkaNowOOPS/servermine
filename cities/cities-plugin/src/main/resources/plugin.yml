@@ -10,7 +10,7 @@ libraries:
 commands:
   smcities:
     description: Административная диагностика и предпросмотр GUI
-    usage: /smcities <status|givebook|open|preview|invite|accept|kick|leave|treasury> [player] [menu]
+    usage: /smcities <status|givebook|open|preview|invite|accept|kick|leave|treasury> [player|deposit|history] [menu|amount]
 permissions:
   servermine.cities.admin:
     default: op

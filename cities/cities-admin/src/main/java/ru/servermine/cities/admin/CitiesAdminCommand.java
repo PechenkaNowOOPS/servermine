@@ -4,14 +4,14 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.*;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
-import ru.servermine.cities.api.CityMembershipCode;
 import ru.servermine.cities.api.CityTreasuryCode;
 import ru.servermine.cities.api.CitiesService;
 import ru.servermine.cities.gui.*;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-public final class CitiesAdminCommand implements CommandExecutor {
+public final class CitiesAdminCommand implements CommandExecutor, TabCompleter {
     private final CitiesService cities;
     private final CityBookService books;
     private final MenuManager menus;
@@ -19,6 +19,52 @@ public final class CitiesAdminCommand implements CommandExecutor {
     public CitiesAdminCommand(JavaPlugin plugin, CitiesService cities, CityBookService books, MenuManager menus) {
         this.plugin = plugin; this.cities = cities; this.books = books; this.menus = menus;
     }
+
+    @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (args.length == 1) {
+            List<String> options = new ArrayList<>(List.of("invite", "accept", "kick", "leave", "treasury"));
+            if (sender.hasPermission("servermine.cities.admin")) {
+                options.addAll(List.of("status", "givebook", "open", "preview"));
+            }
+            return matching(options, args[0]);
+        }
+
+        String action = args[0].toLowerCase(Locale.ROOT);
+        if (action.equals("treasury") && sender instanceof Player) {
+            if (args.length == 2) return matching(List.of("deposit", "history"), args[1]);
+            if (args.length == 3 && args[1].equalsIgnoreCase("deposit")) {
+                return matching(List.of("100", "250", "500", "750", "1000"), args[2]);
+            }
+            return List.of();
+        }
+
+        if (action.equals("open") || action.equals("preview")) {
+            if (!sender.hasPermission("servermine.cities.admin")) return List.of();
+            if (args.length == 2) return onlinePlayers(args[1]);
+            if (args.length == 3) {
+                return matching(List.of("MAIN", "TERRITORY", "UPGRADES", "TREASURY", "RESIDENTS", "MANAGEMENT", "DIPLOMACY"), args[2]);
+            }
+        }
+
+        if (action.equals("givebook") || action.equals("invite") || action.equals("kick")) {
+            if ((action.equals("givebook") && !sender.hasPermission("servermine.cities.admin"))
+                    || (!(sender instanceof Player) && !sender.hasPermission("servermine.cities.admin"))) {
+                return List.of();
+            }
+            if (args.length == 2) return onlinePlayers(args[1]);
+        }
+        return List.of();
+    }
+
+    private List<String> onlinePlayers(String prefix) {
+        return matching(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), prefix);
+    }
+
+    private List<String> matching(List<String> options, String prefix) {
+        String normalized = prefix.toLowerCase(Locale.ROOT);
+        return options.stream().filter(option -> option.toLowerCase(Locale.ROOT).startsWith(normalized)).toList();
+    }
+
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length > 0 && args[0].equalsIgnoreCase("treasury")) {
             if (!(sender instanceof Player player)) { sender.sendMessage("Эта команда доступна только игроку."); return true; }

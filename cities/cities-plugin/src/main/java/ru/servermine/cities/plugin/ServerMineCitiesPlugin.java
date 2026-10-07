@@ -1,5 +1,6 @@
 package ru.servermine.cities.plugin;
 
+import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import ru.servermine.cities.api.CitiesService;
@@ -70,8 +71,10 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new GuiListener(this, books, menus), this);
             getServer().getPluginManager().registerEvents(new CityProtectionListener(this, protectionIndex), this);
             getLogger().info("City protection cache loaded: " + protectionIndex.claimCount() + " claimed chunks.");
-            Objects.requireNonNull(getCommand("smcities"), "smcities command is missing")
-                    .setExecutor(new CitiesAdminCommand(this, citiesService, books, menus));
+            CitiesAdminCommand citiesCommand = new CitiesAdminCommand(this, citiesService, books, menus);
+            PluginCommand command = Objects.requireNonNull(getCommand("smcities"), "smcities command is missing");
+            command.setExecutor(citiesCommand);
+            command.setTabCompleter(citiesCommand);
 
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
             getLogger().info("City founding, configured progression, and territory purchase services are ready.");
