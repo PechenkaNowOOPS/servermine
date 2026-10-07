@@ -5,6 +5,8 @@ api-version: '26.2'
 authors: [ServerMine]
 description: Модульная основа Cities и книга управления городом.
 depend: [ServerMineEconomy]
+libraries:
+  - org.xerial:sqlite-jdbc:${sqliteVersion}
 commands:
   smcities:
     description: Административная диагностика и предпросмотр GUI

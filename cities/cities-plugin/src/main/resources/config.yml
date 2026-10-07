@@ -5,6 +5,9 @@ book:
 visual:
   # Source images contain baked demo names/numbers; use for admin preview only.
   use-pixel-backgrounds: false
+storage:
+  sqlite-file: "cities.db"
+  busy-timeout-ms: 5000
 territory:
   # Preview price, not an active purchase policy.
   chunk-price: 750

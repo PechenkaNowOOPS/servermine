@@ -19,9 +19,10 @@ dependencies {
     compileOnly(project(":economy:economy-api"))
 }
 val pluginVersion = version.toString()
+val pluginProperties = mapOf("version" to pluginVersion, "sqliteVersion" to property("sqliteVersion").toString())
 tasks.processResources {
-    inputs.property("version", pluginVersion)
-    filesMatching("plugin.yml") { expand(mapOf("version" to pluginVersion)) }
+    inputs.properties(pluginProperties)
+    filesMatching("plugin.yml") { expand(pluginProperties) }
 }
 tasks.jar {
     archiveBaseName.set("ServerMineCities")
