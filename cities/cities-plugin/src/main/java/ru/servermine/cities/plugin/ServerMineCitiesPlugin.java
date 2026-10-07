@@ -50,7 +50,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
 
             EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
-            getLogger().info("Free city founding API is ready; player-facing founding and territory purchase flows are still under development.");
+            getLogger().info("City founding from the management book is ready; territory purchases and other city mutations are still under development.");
         } catch (Exception error) {
             getLogger().severe("ServerMineCities could not initialize its database: " + error.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "Cities startup failed", error);

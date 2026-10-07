@@ -3,7 +3,7 @@
 Использовать отдельный тестовый Purpur 26.2 на Java 25. Не использовать боевые данные.
 
 1. Установить Economy и Cities JAR, проверить успешную загрузку libraries и отсутствие исключений.
-2. `/smeconomy status`: readiness=true; `/smcities status`: storage ready=true, mutations disabled.
+2. `/smeconomy status`: readiness=true; `/smcities status`: storage and founding ready=true, territory purchases disabled.
 3. Выдать/списать монеты административными командами; проверить номиналы, сдачу, недостаток денег, заполненный инвентарь и offline.
 4. Переименовать обычный предмет под монету: verify должен отклонить его.
 5. Запустить тестовый consumer с сохранённым UUID: повтор операции не меняет деньги повторно, изменённые параметры дают конфликт.
