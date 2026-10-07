@@ -1,0 +1,35 @@
+# Build and tools
+.gradle/
+**/build/
+.kotlin/
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+# Local configuration, credentials and runtime data
+.env
+.env.*
+!.env.example
+local.properties
+**/currency.secret
+*.pem
+*.key
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/plugins/
+**/logs/
+**/crash-reports/
+**/world*/
+**/server.properties
+**/eula.txt
+run/
+runs/
+test-server/
+paperweight-userdev/
+.DS_Store
+Thumbs.db
