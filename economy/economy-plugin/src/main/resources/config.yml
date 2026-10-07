@@ -1,0 +1,38 @@
+# ServerMineEconomy
+# Названия и курс номиналов пока считаются балансировочными и могут меняться конфигом.
+
+currency:
+  type: "servermine_coin"
+  schema-version: 1
+  denominations:
+    small:
+      value: 1
+      material: IRON_NUGGET
+      display-name: "Малая монета"
+      lore:
+        - "Физическая валюта Server Mine"
+    medium:
+      value: 10
+      material: GOLD_NUGGET
+      display-name: "Средняя монета"
+      lore:
+        - "Стоимость: 10 малых единиц"
+    large:
+      value: 100
+      material: EMERALD
+      display-name: "Крупная монета"
+      lore:
+        - "Стоимость: 100 малых единиц"
+
+storage:
+  sqlite-file: "economy.db"
+  busy-timeout-ms: 5000
+
+security:
+  # Создаётся автоматически при первом запуске и НЕ хранится здесь.
+  secret-file: "currency.secret"
+
+operations:
+  # PREPARED после аварийной остановки переводятся в UNKNOWN при следующем запуске.
+  # Это специально блокирует автоматический повтор потенциально уже выполненной операции.
+  mark-prepared-as-unknown-on-startup: true

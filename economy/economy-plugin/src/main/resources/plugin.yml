@@ -1,0 +1,17 @@
+name: ServerMineEconomy
+version: ${version}
+main: ru.servermine.economy.internal.ServerMineEconomyPlugin
+api-version: '26.2'
+authors: [ServerMine]
+description: Физическая экономика и публичный Economy API для модулей Server Mine.
+libraries:
+  - org.xerial:sqlite-jdbc:${sqliteVersion}
+commands:
+  smeconomy:
+    description: Административная диагностика ServerMineEconomy
+    usage: /smeconomy <status|balance|give|take|verify|op|reload>
+    permission: servermine.economy.admin
+permissions:
+  servermine.economy.admin:
+    description: Администрирование ServerMineEconomy
+    default: op
