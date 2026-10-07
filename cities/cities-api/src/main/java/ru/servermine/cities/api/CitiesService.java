@@ -10,4 +10,9 @@ public interface CitiesService {
     boolean isReady();
     CompletionStage<Optional<CityView>> city(UUID cityId);
     CompletionStage<Optional<CityView>> cityForPlayer(UUID playerId);
+
+    /** A service can be used to query cities before optional mutation services become available. */
+    default Optional<CityFoundingService> foundingService() {
+        return Optional.empty();
+    }
 }

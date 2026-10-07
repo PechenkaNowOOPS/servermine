@@ -8,6 +8,9 @@ visual:
 storage:
   sqlite-file: "cities.db"
   busy-timeout-ms: 5000
+protection:
+  # Protected rectangles use chunk coordinates. Each entry requires a world UUID and inclusive bounds.
+  system-zones: []
 territory:
   # Preview price, not an active purchase policy.
   chunk-price: 750

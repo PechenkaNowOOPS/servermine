@@ -3,6 +3,9 @@ package ru.servermine.cities.storage;
 import ru.servermine.cities.api.ChunkPosition;
 import ru.servermine.cities.api.CityStage;
 import ru.servermine.cities.api.CityView;
+import ru.servermine.cities.api.CityFoundationCode;
+import ru.servermine.cities.api.CityFoundationDraft;
+import ru.servermine.cities.api.CityFoundationResult;
 import ru.servermine.cities.core.CityRepository;
 
 import java.nio.file.Path;
@@ -20,6 +23,12 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.Comparator;
+import java.util.HexFormat;
 
 /**
  * SQLite adapter owned by Cities. Database calls run on the injected I/O executor;
@@ -158,6 +167,216 @@ public final class SqliteCityRepository implements CityRepository {
             }
         });
     }
+
+    @Override
+    public CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft) {
+        return async(() -> {
+            String payload = foundationPayload(draft);
+            String hash = sha256(payload);
+            try (Connection connection = connection()) {
+                ExistingOperation existing = findOperation(connection, draft.operationId());
+                if (existing == null) return Optional.empty();
+                if (!existing.type.equals("FOUND_CITY") || !existing.requestHash.equals(hash)) {
+                    return Optional.of(foundationResult(draft.operationId(), CityFoundationCode.OPERATION_CONFLICT, null, true));
+                }
+                if (existing.state.equals("COMPLETED")) {
+                    CityView city = readCity(connection, UUID.fromString(existing.cityId)).orElse(null);
+                    return Optional.of(foundationResult(draft.operationId(), city == null
+                            ? CityFoundationCode.INTERNAL_ERROR : CityFoundationCode.REPLAYED, city, true));
+                }
+                return Optional.of(foundationResult(draft.operationId(), parseFoundationCode(existing.resultCode), null, true));
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<CityFoundationResult> found(CityFoundationDraft draft) {
+        return async(() -> foundTransaction(draft));
+    }
+
+    private CityFoundationResult foundTransaction(CityFoundationDraft draft) throws SQLException {
+        validateFootprint(draft);
+        String payload = foundationPayload(draft);
+        String hash = sha256(payload);
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                ExistingOperation existing = findOperation(connection, draft.operationId());
+                if (existing != null) {
+                    connection.commit();
+                    if (!existing.type.equals("FOUND_CITY") || !existing.requestHash.equals(hash)) {
+                        return foundationResult(draft.operationId(), CityFoundationCode.OPERATION_CONFLICT, null, true);
+                    }
+                    if (existing.state.equals("COMPLETED")) {
+                        CityView city = readCity(connection, UUID.fromString(existing.cityId)).orElse(null);
+                        return foundationResult(draft.operationId(), city == null
+                                ? CityFoundationCode.INTERNAL_ERROR : CityFoundationCode.REPLAYED, city, true);
+                    }
+                    return foundationResult(draft.operationId(), parseFoundationCode(existing.resultCode), null, true);
+                }
+
+                CityFoundationCode failure = foundingConflict(connection, draft);
+                if (failure != null) {
+                    recordFoundationFailure(connection, draft, hash, payload, failure);
+                    connection.commit();
+                    return foundationResult(draft.operationId(), failure, null, false);
+                }
+
+                String now = Instant.now().toString();
+                try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO cities(city_uuid, name, name_key, stage, treasury, revision, founder_uuid, created_at)
+                        VALUES (?, ?, ?, 'SETTLEMENT', 0, 1, ?, ?)
+                        """)) {
+                    insert.setString(1, draft.cityId().toString());
+                    insert.setString(2, draft.name());
+                    insert.setString(3, draft.nameKey());
+                    insert.setString(4, draft.founderId().toString());
+                    insert.setString(5, now);
+                    insert.executeUpdate();
+                }
+                try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO city_members(city_uuid, player_uuid, last_known_name, role_id, joined_at)
+                        VALUES (?, ?, ?, 'RULER', ?)
+                        """)) {
+                    insert.setString(1, draft.cityId().toString());
+                    insert.setString(2, draft.founderId().toString());
+                    insert.setString(3, draft.founderName());
+                    insert.setString(4, now);
+                    insert.executeUpdate();
+                }
+                try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO city_chunks(world_uuid, chunk_x, chunk_z, city_uuid, claimed_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """)) {
+                    for (ChunkPosition chunk : sortedChunks(draft)) {
+                        insert.setString(1, chunk.worldId().toString());
+                        insert.setInt(2, chunk.x());
+                        insert.setInt(3, chunk.z());
+                        insert.setString(4, draft.cityId().toString());
+                        insert.setString(5, now);
+                        insert.addBatch();
+                    }
+                    insert.executeBatch();
+                }
+                recordFoundationOperation(connection, draft, hash, payload, "COMPLETED", CityFoundationCode.CREATED, now);
+                CityView city = readCity(connection, draft.cityId()).orElseThrow(
+                        () -> new SQLException("New city could not be read inside its transaction"));
+                connection.commit();
+                return foundationResult(draft.operationId(), CityFoundationCode.CREATED, city, false);
+            } catch (SQLException | RuntimeException error) {
+                connection.rollback();
+                throw error;
+            }
+        }
+    }
+
+    private CityFoundationCode foundingConflict(Connection connection, CityFoundationDraft draft) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("SELECT 1 FROM city_members WHERE player_uuid = ?")) {
+            query.setString(1, draft.founderId().toString());
+            try (ResultSet result = query.executeQuery()) { if (result.next()) return CityFoundationCode.ALREADY_IN_CITY; }
+        }
+        try (PreparedStatement query = connection.prepareStatement("SELECT 1 FROM cities WHERE name_key = ?")) {
+            query.setString(1, draft.nameKey());
+            try (ResultSet result = query.executeQuery()) { if (result.next()) return CityFoundationCode.NAME_ALREADY_USED; }
+        }
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM city_chunks WHERE world_uuid = ? AND chunk_x = ? AND chunk_z = ?
+                """)) {
+            for (ChunkPosition chunk : sortedChunks(draft)) {
+                query.setString(1, chunk.worldId().toString());
+                query.setInt(2, chunk.x());
+                query.setInt(3, chunk.z());
+                try (ResultSet result = query.executeQuery()) { if (result.next()) return CityFoundationCode.CHUNK_ALREADY_CLAIMED; }
+            }
+        }
+        return null;
+    }
+
+    private void validateFootprint(CityFoundationDraft draft) throws SQLException {
+        if (draft.initialChunks().size() != 4) throw new SQLException("A city must start with four chunks");
+        UUID world = draft.initialChunks().iterator().next().worldId();
+        int minX = draft.initialChunks().stream().mapToInt(ChunkPosition::x).min().orElseThrow();
+        int maxX = draft.initialChunks().stream().mapToInt(ChunkPosition::x).max().orElseThrow();
+        int minZ = draft.initialChunks().stream().mapToInt(ChunkPosition::z).min().orElseThrow();
+        int maxZ = draft.initialChunks().stream().mapToInt(ChunkPosition::z).max().orElseThrow();
+        if (draft.initialChunks().stream().anyMatch(chunk -> !chunk.worldId().equals(world))
+                || (long) maxX - minX != 1 || (long) maxZ - minZ != 1) {
+            throw new SQLException("Initial city chunks must form a 2x2 footprint in one world");
+        }
+    }
+
+    private ExistingOperation findOperation(Connection connection, UUID operationId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT operation_type, request_hash, state, result_code, city_uuid
+                FROM city_operations WHERE operation_uuid = ?
+                """)) {
+            query.setString(1, operationId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? new ExistingOperation(result.getString("operation_type"),
+                        result.getString("request_hash"), result.getString("state"),
+                        result.getString("result_code"), result.getString("city_uuid")) : null;
+            }
+        }
+    }
+
+    private void recordFoundationFailure(Connection connection, CityFoundationDraft draft, String hash,
+                                         String payload, CityFoundationCode code) throws SQLException {
+        recordFoundationOperation(connection, draft, hash, payload, "FAILED", code, Instant.now().toString());
+    }
+
+    private void recordFoundationOperation(Connection connection, CityFoundationDraft draft, String hash,
+                                           String payload, String state, CityFoundationCode code, String now)
+            throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO city_operations(operation_uuid, operation_type, request_hash, request_payload, state,
+                    result_code, city_uuid, actor_uuid, created_at, updated_at)
+                VALUES (?, 'FOUND_CITY', ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, draft.operationId().toString());
+            insert.setString(2, hash);
+            insert.setString(3, payload);
+            insert.setString(4, state);
+            insert.setString(5, code.name());
+            insert.setString(6, state.equals("COMPLETED") ? draft.cityId().toString() : null);
+            insert.setString(7, draft.founderId().toString());
+            insert.setString(8, now);
+            insert.setString(9, now);
+            insert.executeUpdate();
+        }
+    }
+
+    private List<ChunkPosition> sortedChunks(CityFoundationDraft draft) {
+        return draft.initialChunks().stream().sorted(Comparator.comparing((ChunkPosition c) -> c.worldId().toString())
+                .thenComparingInt(ChunkPosition::x).thenComparingInt(ChunkPosition::z)).toList();
+    }
+
+    private String foundationPayload(CityFoundationDraft draft) {
+        StringBuilder value = new StringBuilder().append(draft.founderId()).append('\n').append(draft.founderName())
+                .append('\n').append(draft.cityId()).append('\n').append(draft.name()).append('\n').append(draft.nameKey());
+        for (ChunkPosition chunk : sortedChunks(draft)) value.append('\n').append(chunk.worldId()).append(':').append(chunk.x()).append(':').append(chunk.z());
+        return value.toString();
+    }
+
+    private String sha256(String value) {
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); }
+        catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException("SHA-256 is unavailable", impossible); }
+    }
+
+    private CityFoundationCode parseFoundationCode(String value) {
+        try { return CityFoundationCode.valueOf(value); }
+        catch (IllegalArgumentException invalid) { return CityFoundationCode.INTERNAL_ERROR; }
+    }
+
+    private CityFoundationResult foundationResult(UUID operationId, CityFoundationCode code, CityView city, boolean replay) {
+        Optional<CityView> view = (code == CityFoundationCode.CREATED || code == CityFoundationCode.REPLAYED)
+                ? Optional.ofNullable(city) : Optional.empty();
+        if (view.isEmpty() && (code == CityFoundationCode.CREATED || code == CityFoundationCode.REPLAYED)) {
+            code = CityFoundationCode.INTERNAL_ERROR;
+        }
+        return new CityFoundationResult(operationId, code, view, replay);
+    }
+
+    private record ExistingOperation(String type, String requestHash, String state, String resultCode, String cityId) { }
 
     private Optional<CityView> readCity(UUID cityId) {
         try (Connection connection = connection()) {

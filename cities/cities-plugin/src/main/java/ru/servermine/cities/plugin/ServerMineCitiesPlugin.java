@@ -3,8 +3,11 @@ package ru.servermine.cities.plugin;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import ru.servermine.cities.api.CitiesService;
+import ru.servermine.cities.api.CityFoundingService;
 import ru.servermine.cities.core.PersistedCitiesService;
 import ru.servermine.cities.storage.SqliteCityRepository;
+import ru.servermine.cities.creation.CityFoundingServiceImpl;
+import ru.servermine.cities.protection.BukkitFoundationPolicy;
 import ru.servermine.cities.admin.CitiesAdminCommand;
 import ru.servermine.cities.gui.*;
 import ru.servermine.economy.api.EconomyService;
@@ -18,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 public final class ServerMineCitiesPlugin extends JavaPlugin {
     private ExecutorService databaseExecutor;
     private PersistedCitiesService citiesService;
+    private CityFoundingServiceImpl cityFoundingService;
 
     @Override public void onEnable() {
         try {
@@ -34,7 +38,9 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             SqliteCityRepository repository = new SqliteCityRepository(database, busyTimeout, databaseExecutor);
             repository.initialize();
 
-            citiesService = new PersistedCitiesService(repository);
+            BukkitFoundationPolicy protection = new BukkitFoundationPolicy(this, loadSystemZones());
+            cityFoundingService = new CityFoundingServiceImpl(repository, protection);
+            citiesService = new PersistedCitiesService(repository, cityFoundingService);
             getServer().getServicesManager().register(CitiesService.class, citiesService, this, ServicePriority.Normal);
             CityBookService books = new CityBookService(this);
             MenuManager menus = new MenuManager(this, citiesService);
@@ -44,7 +50,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
 
             EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
-            getLogger().warning("City creation and territory mutations are not implemented yet. /smcities preview opens read-only mockups.");
+            getLogger().info("Free city founding API is ready; player-facing founding and territory purchase flows are still under development.");
         } catch (Exception error) {
             getLogger().severe("ServerMineCities could not initialize its database: " + error.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "Cities startup failed", error);
@@ -53,12 +59,34 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
         }
     }
     @Override public void onDisable() {
+        if (cityFoundingService != null) cityFoundingService.deactivate();
         if (citiesService != null) citiesService.deactivate();
         getServer().getServicesManager().unregisterAll(this);
         getServer().getOnlinePlayers().stream()
             .filter(p -> p.getOpenInventory().getTopInventory().getHolder() instanceof MenuHolder)
             .forEach(org.bukkit.entity.Player::closeInventory);
         closeDatabaseExecutor();
+    }
+
+    private java.util.List<BukkitFoundationPolicy.SystemZone> loadSystemZones() {
+        java.util.List<BukkitFoundationPolicy.SystemZone> zones = new java.util.ArrayList<>();
+        for (java.util.Map<?, ?> row : getConfig().getMapList("protection.system-zones")) {
+            Object world = row.get("world");
+            if (world == null) throw new IllegalArgumentException("protection.system-zones entry is missing world UUID");
+            try {
+                zones.add(new BukkitFoundationPolicy.SystemZone(java.util.UUID.fromString(world.toString()),
+                        integer(row, "min-x"), integer(row, "max-x"), integer(row, "min-z"), integer(row, "max-z")));
+            } catch (RuntimeException invalid) {
+                throw new IllegalArgumentException("Invalid protection.system-zones entry: " + row, invalid);
+            }
+        }
+        return java.util.List.copyOf(zones);
+    }
+
+    private int integer(java.util.Map<?, ?> row, String key) {
+        Object value = row.get(key);
+        if (!(value instanceof Number number)) throw new IllegalArgumentException("Missing integer " + key);
+        return number.intValue();
     }
 
     private void closeDatabaseExecutor() {

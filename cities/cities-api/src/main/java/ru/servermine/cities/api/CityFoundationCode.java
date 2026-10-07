@@ -1,0 +1,15 @@
+package ru.servermine.cities.api;
+
+public enum CityFoundationCode {
+    CREATED,
+    REPLAYED,
+    INVALID_NAME,
+    ALREADY_IN_CITY,
+    NAME_ALREADY_USED,
+    CHUNK_ALREADY_CLAIMED,
+    OPERATION_CONFLICT,
+    WORLD_UNAVAILABLE,
+    PROTECTED_ZONE,
+    SERVICE_UNAVAILABLE,
+    INTERNAL_ERROR
+}

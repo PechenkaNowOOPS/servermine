@@ -5,7 +5,7 @@ Cities-owned SQLite adapter. The v1 schema contains:
 - `cities` — progression stage, treasury amount, revision and founder identity.
 - `city_members` — one current city per player, role id and last-known display name.
 - `city_chunks` — a unique `(world_uuid, chunk_x, chunk_z)` key so a chunk cannot belong to two cities.
-- `city_operations` — stable operation UUID, request fingerprint, persisted intent payload and recovery state for future domain workflows.
+- `city_operations` — stable operation UUID and payload fingerprint; city founding is journaled transactionally, while purchase saga recovery remains future work.
 - `city_treasury_entries` — idempotent journal rows owned by Cities.
 
 Initialization uses a transactional, numbered SQLite migration (`PRAGMA user_version`). The connection enables WAL, FULL synchronous durability,
