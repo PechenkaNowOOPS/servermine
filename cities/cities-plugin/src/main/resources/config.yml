@@ -12,10 +12,10 @@ protection:
   # Protected rectangles use chunk coordinates. Each entry requires a world UUID and inclusive bounds.
   system-zones: []
 territory:
-  # Price per adjacent chunk in physical coins. Set to 0 for free claims.
+  # Price per adjacent chunk, paid from the city treasury. Set to 0 for free claims.
   chunk-price: 750
 progression:
-  # Promotion price and requirements are server balance settings. Price 0 makes this transition free.
+  # Promotion price is paid from the city treasury. Price 0 makes this transition free.
   settlement-to-village:
     enabled: true
     price: 0

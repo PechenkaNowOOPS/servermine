@@ -5,6 +5,7 @@ import org.bukkit.command.*;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import ru.servermine.cities.api.CityMembershipCode;
+import ru.servermine.cities.api.CityTreasuryCode;
 import ru.servermine.cities.api.CitiesService;
 import ru.servermine.cities.gui.*;
 import java.util.List;
@@ -19,6 +20,49 @@ public final class CitiesAdminCommand implements CommandExecutor {
         this.plugin = plugin; this.cities = cities; this.books = books; this.menus = menus;
     }
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length > 0 && args[0].equalsIgnoreCase("treasury")) {
+            if (!(sender instanceof Player player)) { sender.sendMessage("Эта команда доступна только игроку."); return true; }
+            var treasury = cities.treasuryService().orElse(null);
+            if (treasury == null || !treasury.isReady()) { player.sendMessage("Казна города восстанавливает операции или временно недоступна."); return true; }
+            if (args.length == 3 && args[1].equalsIgnoreCase("deposit")) {
+                long amount;
+                try { amount = Long.parseLong(args[2]); }
+                catch (NumberFormatException invalid) { player.sendMessage("Укажите целую сумму монет."); return true; }
+                if (amount <= 0) { player.sendMessage("Сумма должна быть больше нуля."); return true; }
+                treasury.deposit(player.getUniqueId(), amount).whenComplete((result, error) ->
+                        plugin.getServer().getScheduler().runTask(plugin, () -> {
+                            if (!player.isOnline()) return;
+                            if (error != null || result == null) { player.sendMessage("Не удалось пополнить казну."); return; }
+                            switch (result.code()) {
+                                case DEPOSITED -> player.sendMessage("В казну внесено " + amount + " монет. Новый баланс: "
+                                        + result.city().orElseThrow().treasury() + " монет.");
+                                case NO_CITY -> player.sendMessage("Вы не состоите в городе.");
+                                case INVALID_AMOUNT -> player.sendMessage("Сумма должна быть больше нуля.");
+                                case INSUFFICIENT_FUNDS -> player.sendMessage("У вас недостаточно физических монет.");
+                                case ECONOMY_UNAVAILABLE -> player.sendMessage("Экономика временно недоступна.");
+                                case OPERATION_IN_PROGRESS, UNKNOWN_OUTCOME -> player.sendMessage("Операция ещё сверяется. Не повторяйте платёж; после перезапуска она будет восстановлена.");
+                                case SERVICE_UNAVAILABLE -> player.sendMessage("Казна города временно недоступна.");
+                                case INTERNAL_ERROR -> player.sendMessage("Не удалось пополнить казну.");
+                            }
+                        }));
+                return true;
+            }
+            if (args.length == 2 && args[1].equalsIgnoreCase("history")) {
+                treasury.history(player.getUniqueId(), 10).whenComplete((entries, error) ->
+                        plugin.getServer().getScheduler().runTask(plugin, () -> {
+                            if (!player.isOnline()) return;
+                            if (error != null) { player.sendMessage("Не удалось загрузить историю казны."); return; }
+                            if (entries.isEmpty()) { player.sendMessage("Операций в казне пока нет."); return; }
+                            player.sendMessage("Последние операции казны:");
+                            entries.forEach(entry -> player.sendMessage((entry.amount() > 0 ? "+" : "−")
+                                    + Math.abs(entry.amount()) + " монет; баланс " + entry.balanceAfter()
+                                    + "; " + entry.reason() + "; " + entry.occurredAt()));
+                        }));
+                return true;
+            }
+            player.sendMessage("Использование: /smcities treasury deposit <сумма> | /smcities treasury history");
+            return true;
+        }
         if (args.length > 0 && args[0].equalsIgnoreCase("invite")) {
             if (args.length != 2) { sender.sendMessage("Использование: /smcities invite <игрок>"); return true; }
             if (!(sender instanceof Player player)) { sender.sendMessage("Эта команда доступна только игроку."); return true; }
@@ -126,7 +170,8 @@ public final class CitiesAdminCommand implements CommandExecutor {
                     + "; founding ready=" + cities.foundingService().filter(ru.servermine.cities.api.CityFoundingService::isReady).isPresent()
                     + "; progression ready=" + cities.progressionService().filter(ru.servermine.cities.api.CityProgressionService::isReady).isPresent()
                     + "; territory ready=" + cities.territoryService().filter(ru.servermine.cities.api.CityTerritoryService::isReady).isPresent()
-                    + "; members ready=" + cities.membershipService().filter(ru.servermine.cities.api.CityMembershipService::isReady).isPresent());
+                    + "; members ready=" + cities.membershipService().filter(ru.servermine.cities.api.CityMembershipService::isReady).isPresent()
+                    + "; treasury ready=" + cities.treasuryService().filter(ru.servermine.cities.api.CityTreasuryService::isReady).isPresent());
             sender.sendMessage("/smcities <givebook|open|preview> <игрок> [menu]; /smcities invite <игрок>; /smcities accept; /smcities kick <игрок>; /smcities leave");
             return true;
         }

@@ -15,6 +15,7 @@ import ru.servermine.cities.progression.CityProgressionServiceImpl;
 import ru.servermine.cities.progression.StagePromotionPolicy;
 import ru.servermine.cities.territory.CityTerritoryServiceImpl;
 import ru.servermine.cities.members.CityMembershipServiceImpl;
+import ru.servermine.cities.treasury.CityTreasuryServiceImpl;
 import ru.servermine.cities.admin.CitiesAdminCommand;
 import ru.servermine.cities.gui.*;
 import ru.servermine.economy.api.EconomyService;
@@ -32,6 +33,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
     private CityProgressionServiceImpl cityProgressionService;
     private CityTerritoryServiceImpl cityTerritoryService;
     private CityMembershipServiceImpl cityMembershipService;
+    private CityTreasuryServiceImpl cityTreasuryService;
 
     @Override public void onEnable() {
         try {
@@ -53,14 +55,15 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             BukkitFoundationPolicy protection = new BukkitFoundationPolicy(this, loadSystemZones());
             cityFoundingService = new CityFoundingServiceImpl(repository, protection, protectionIndex::replaceCity);
             EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
-            cityProgressionService = new CityProgressionServiceImpl(repository, economy, loadPromotionPolicies());
-            cityTerritoryService = new CityTerritoryServiceImpl(repository, economy,
+            cityProgressionService = new CityProgressionServiceImpl(repository, loadPromotionPolicies());
+            cityTerritoryService = new CityTerritoryServiceImpl(repository,
                     getConfig().getLong("territory.chunk-price", 750),
                     target -> protection.checkTarget(target).thenApply(decision -> decision == ru.servermine.cities.protection.FoundationDecision.ALLOWED),
                     protection::checkTargets, protectionIndex::replaceCity);
             cityMembershipService = new CityMembershipServiceImpl(repository, protectionIndex::replaceCity);
+            cityTreasuryService = new CityTreasuryServiceImpl(repository, economy, protectionIndex::replaceCity);
             citiesService = new PersistedCitiesService(repository, cityFoundingService, cityProgressionService,
-                    cityTerritoryService, cityMembershipService);
+                    cityTerritoryService, cityMembershipService, cityTreasuryService);
             getServer().getServicesManager().register(CitiesService.class, citiesService, this, ServicePriority.Normal);
             CityBookService books = new CityBookService(this);
             MenuManager menus = new MenuManager(this, citiesService);
@@ -72,6 +75,10 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
 
             getLogger().info("Cities storage is ready. Economy ready=" + (economy != null && economy.isReady()));
             getLogger().info("City founding, configured progression, and territory purchase services are ready.");
+            cityTreasuryService.recoverPending().whenComplete((ignored, error) -> {
+                if (error != null) getLogger().severe("City treasury recovery failed: " + error.getMessage());
+                else getLogger().info("City treasury recovery completed.");
+            });
         } catch (Exception error) {
             getLogger().severe("ServerMineCities could not initialize its database: " + error.getMessage());
             getLogger().log(java.util.logging.Level.SEVERE, "Cities startup failed", error);
@@ -83,6 +90,7 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
         if (cityProgressionService != null) cityProgressionService.deactivate();
         if (cityTerritoryService != null) cityTerritoryService.deactivate();
         if (cityMembershipService != null) cityMembershipService.deactivate();
+        if (cityTreasuryService != null) cityTreasuryService.deactivate();
         if (cityFoundingService != null) cityFoundingService.deactivate();
         if (citiesService != null) citiesService.deactivate();
         getServer().getServicesManager().unregisterAll(this);

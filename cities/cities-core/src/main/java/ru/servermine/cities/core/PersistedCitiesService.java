@@ -6,6 +6,7 @@ import ru.servermine.cities.api.CityFoundingService;
 import ru.servermine.cities.api.CityProgressionService;
 import ru.servermine.cities.api.CityTerritoryService;
 import ru.servermine.cities.api.CityMembershipService;
+import ru.servermine.cities.api.CityTreasuryService;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -20,6 +21,7 @@ public final class PersistedCitiesService implements CitiesService {
     private final CityProgressionService progressionService;
     private final CityTerritoryService territoryService;
     private final CityMembershipService membershipService;
+    private final CityTreasuryService treasuryService;
     private volatile boolean ready = true;
 
     public PersistedCitiesService(CityRepository repository) {
@@ -43,11 +45,18 @@ public final class PersistedCitiesService implements CitiesService {
     public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService,
                                   CityProgressionService progressionService, CityTerritoryService territoryService,
                                   CityMembershipService membershipService) {
+        this(repository, foundingService, progressionService, territoryService, membershipService, null);
+    }
+
+    public PersistedCitiesService(CityRepository repository, CityFoundingService foundingService,
+                                  CityProgressionService progressionService, CityTerritoryService territoryService,
+                                  CityMembershipService membershipService, CityTreasuryService treasuryService) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.foundingService = foundingService;
         this.progressionService = progressionService;
         this.territoryService = territoryService;
         this.membershipService = membershipService;
+        this.treasuryService = treasuryService;
     }
 
     public String apiVersion() {
@@ -76,6 +85,11 @@ public final class PersistedCitiesService implements CitiesService {
     @Override
     public Optional<CityMembershipService> membershipService() {
         return ready ? Optional.ofNullable(membershipService) : Optional.empty();
+    }
+
+    @Override
+    public Optional<CityTreasuryService> treasuryService() {
+        return ready ? Optional.ofNullable(treasuryService) : Optional.empty();
     }
 
     public void deactivate() {

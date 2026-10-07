@@ -30,4 +30,8 @@ public interface CitiesService {
     default Optional<CityMembershipService> membershipService() {
         return Optional.empty();
     }
+
+    default Optional<CityTreasuryService> treasuryService() {
+        return Optional.empty();
+    }
 }

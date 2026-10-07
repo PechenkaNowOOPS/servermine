@@ -1,0 +1,13 @@
+package ru.servermine.cities.api;
+
+public enum CityTreasuryCode {
+    DEPOSITED,
+    NO_CITY,
+    INVALID_AMOUNT,
+    INSUFFICIENT_FUNDS,
+    ECONOMY_UNAVAILABLE,
+    OPERATION_IN_PROGRESS,
+    UNKNOWN_OUTCOME,
+    SERVICE_UNAVAILABLE,
+    INTERNAL_ERROR
+}

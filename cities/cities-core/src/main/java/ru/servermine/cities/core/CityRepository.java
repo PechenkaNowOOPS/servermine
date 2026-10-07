@@ -7,6 +7,8 @@ import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.api.CityClaimResult;
 import ru.servermine.cities.api.CityLeaveResult;
 import ru.servermine.cities.api.CityMembershipResult;
+import ru.servermine.cities.api.CityTreasuryEntry;
+import ru.servermine.cities.api.CityTreasuryResult;
 
 import java.util.Optional;
 import java.util.List;
@@ -29,6 +31,24 @@ public interface CityRepository {
     CompletionStage<CityMembershipResult> acceptCityInvite(UUID playerId, String playerName);
 
     CompletionStage<CityMembershipResult> kickCityMember(UUID actorId, UUID targetId, long expectedRevision);
+
+    CompletionStage<CityTreasuryResult> prepareTreasuryDeposit(CityTreasuryDraft draft);
+
+    CompletionStage<Boolean> reserveTreasuryDeposit(UUID operationId);
+
+    CompletionStage<CityTreasuryResult> applyTreasuryDeposit(CityTreasuryDraft draft);
+
+    CompletionStage<Void> markTreasuryCommitPending(UUID operationId);
+
+    CompletionStage<CityTreasuryResult> completeTreasuryDeposit(UUID operationId);
+
+    CompletionStage<Void> failTreasuryDeposit(UUID operationId, boolean releasePending);
+
+    CompletionStage<Void> markTreasuryDepositReleased(UUID operationId);
+
+    CompletionStage<List<PendingTreasuryDeposit>> pendingTreasuryDeposits();
+
+    CompletionStage<List<CityTreasuryEntry>> treasuryHistory(UUID cityId, int limit);
 
     CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft);
 

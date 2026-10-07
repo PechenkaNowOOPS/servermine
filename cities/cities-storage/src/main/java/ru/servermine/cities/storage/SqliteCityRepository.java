@@ -14,9 +14,14 @@ import ru.servermine.cities.api.CityLeaveCode;
 import ru.servermine.cities.api.CityLeaveResult;
 import ru.servermine.cities.api.CityMembershipCode;
 import ru.servermine.cities.api.CityMembershipResult;
+import ru.servermine.cities.api.CityTreasuryCode;
+import ru.servermine.cities.api.CityTreasuryEntry;
+import ru.servermine.cities.api.CityTreasuryResult;
 import ru.servermine.cities.core.CityRepository;
 import ru.servermine.cities.core.CityPromotionDraft;
 import ru.servermine.cities.core.CityClaimDraft;
+import ru.servermine.cities.core.CityTreasuryDraft;
+import ru.servermine.cities.core.PendingTreasuryDeposit;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -512,6 +517,284 @@ public final class SqliteCityRepository implements CityRepository {
     }
 
     @Override
+    public CompletionStage<CityTreasuryResult> prepareTreasuryDeposit(CityTreasuryDraft draft) {
+        return async(() -> treasuryTransaction(connection -> {
+            String payload = treasuryPayload(draft);
+            String hash = sha256(payload);
+            ExistingOperation existing = findOperation(connection, draft.operationId());
+            if (existing != null) {
+                if (!existing.type.equals("TREASURY_DEPOSIT") || !existing.requestHash.equals(hash)) {
+                    connection.commit();
+                    return treasuryResult(draft.operationId(), CityTreasuryCode.INTERNAL_ERROR, null);
+                }
+                if (existing.state.equals("COMPLETED")) {
+                    CityView city = readCity(connection, draft.cityId()).orElse(null);
+                    connection.commit();
+                    return treasuryResult(draft.operationId(), city == null ? CityTreasuryCode.INTERNAL_ERROR
+                            : CityTreasuryCode.DEPOSITED, city);
+                }
+                connection.commit();
+                return treasuryResult(draft.operationId(), CityTreasuryCode.OPERATION_IN_PROGRESS, null);
+            }
+            CityView city = readCity(connection, draft.cityId()).orElse(null);
+            if (city == null) {
+                connection.commit();
+                return treasuryResult(draft.operationId(), CityTreasuryCode.NO_CITY, null);
+            }
+            try (PreparedStatement member = connection.prepareStatement(
+                    "SELECT 1 FROM city_members WHERE city_uuid=? AND player_uuid=?")) {
+                member.setString(1, draft.cityId().toString());
+                member.setString(2, draft.actorId().toString());
+                try (ResultSet result = member.executeQuery()) {
+                    if (!result.next()) {
+                        connection.commit();
+                        return treasuryResult(draft.operationId(), CityTreasuryCode.NO_CITY, null);
+                    }
+                }
+            }
+            String now = Instant.now().toString();
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO city_operations(operation_uuid, operation_type, request_hash, request_payload, state,
+                        result_code, city_uuid, actor_uuid, created_at, updated_at)
+                    VALUES (?, 'TREASURY_DEPOSIT', ?, ?, 'PREPARED', 'OPERATION_IN_PROGRESS', ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, draft.operationId().toString());
+                insert.setString(2, hash);
+                insert.setString(3, payload);
+                insert.setString(4, draft.cityId().toString());
+                insert.setString(5, draft.actorId().toString());
+                insert.setString(6, now);
+                insert.setString(7, now);
+                insert.executeUpdate();
+            }
+            connection.commit();
+            return treasuryResult(draft.operationId(), CityTreasuryCode.OPERATION_IN_PROGRESS, null);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Boolean> reserveTreasuryDeposit(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RESERVED', updated_at=?
+                    WHERE operation_uuid=? AND operation_type='TREASURY_DEPOSIT' AND state='PREPARED'
+                    """)) {
+                update.setString(1, Instant.now().toString());
+                update.setString(2, operationId.toString());
+                if (update.executeUpdate() == 1) return true;
+                ExistingOperation operation = findOperation(connection, operationId);
+                return operation != null && operation.type.equals("TREASURY_DEPOSIT") && operation.state.equals("RESERVED");
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<CityTreasuryResult> applyTreasuryDeposit(CityTreasuryDraft draft) {
+        return async(() -> treasuryTransaction(connection -> {
+            String hash = sha256(treasuryPayload(draft));
+            ExistingOperation operation = findOperation(connection, draft.operationId());
+            if (operation == null || !operation.type.equals("TREASURY_DEPOSIT") || !operation.requestHash.equals(hash)) {
+                connection.commit();
+                return treasuryResult(draft.operationId(), CityTreasuryCode.INTERNAL_ERROR, null);
+            }
+            if (operation.state.equals("DOMAIN_COMMITTED") || operation.state.equals("COMMIT_PENDING")
+                    || operation.state.equals("COMPLETED")) {
+                CityView city = readCity(connection, draft.cityId()).orElse(null);
+                connection.commit();
+                return treasuryResult(draft.operationId(), city == null ? CityTreasuryCode.INTERNAL_ERROR
+                        : CityTreasuryCode.DEPOSITED, city);
+            }
+            if (!operation.state.equals("RESERVED")) {
+                connection.commit();
+                return treasuryResult(draft.operationId(), CityTreasuryCode.OPERATION_IN_PROGRESS, null);
+            }
+            CityView city = readCity(connection, draft.cityId()).orElse(null);
+            if (city == null) {
+                updateTreasuryState(connection, draft.operationId(), "RESERVED", "RELEASE_PENDING", "NO_CITY");
+                connection.commit();
+                return treasuryResult(draft.operationId(), CityTreasuryCode.NO_CITY, null);
+            }
+            final long balanceAfter;
+            try { balanceAfter = Math.addExact(city.treasury(), draft.amount()); }
+            catch (ArithmeticException overflow) {
+                updateTreasuryState(connection, draft.operationId(), "RESERVED", "RELEASE_PENDING", "INTERNAL_ERROR");
+                connection.commit();
+                return treasuryResult(draft.operationId(), CityTreasuryCode.INTERNAL_ERROR, null);
+            }
+            try (PreparedStatement update = connection.prepareStatement("""
+                    UPDATE cities SET treasury=?, revision=revision+1 WHERE city_uuid=? AND treasury=? AND revision=?
+                    """)) {
+                update.setLong(1, balanceAfter);
+                update.setString(2, draft.cityId().toString());
+                update.setLong(3, city.treasury());
+                update.setLong(4, city.revision());
+                if (update.executeUpdate() != 1) throw new SQLException("City changed during treasury deposit");
+            }
+            insertTreasuryEntry(connection, draft.operationId(), draft.cityId(), draft.amount(), "DEPOSIT");
+            updateTreasuryState(connection, draft.operationId(), "RESERVED", "DOMAIN_COMMITTED", "DEPOSITED");
+            CityView updated = readCity(connection, draft.cityId()).orElseThrow();
+            connection.commit();
+            return treasuryResult(draft.operationId(), CityTreasuryCode.DEPOSITED, updated);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Void> markTreasuryCommitPending(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection()) {
+                updateTreasuryState(connection, operationId, "DOMAIN_COMMITTED", "COMMIT_PENDING", "UNKNOWN_OUTCOME");
+                return null;
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<CityTreasuryResult> completeTreasuryDeposit(UUID operationId) {
+        return async(() -> treasuryTransaction(connection -> {
+            ExistingOperation operation = findOperation(connection, operationId);
+            if (operation == null || !operation.type.equals("TREASURY_DEPOSIT")) {
+                connection.commit();
+                return treasuryResult(operationId, CityTreasuryCode.INTERNAL_ERROR, null);
+            }
+            if (operation.state.equals("DOMAIN_COMMITTED") || operation.state.equals("COMMIT_PENDING")) {
+                updateTreasuryState(connection, operationId, operation.state, "COMPLETED", "DEPOSITED");
+                operation = findOperation(connection, operationId);
+            }
+            if (!operation.state.equals("COMPLETED")) {
+                connection.commit();
+                return treasuryResult(operationId, CityTreasuryCode.OPERATION_IN_PROGRESS, null);
+            }
+            CityView city = operation.cityId == null ? null : readCity(connection, UUID.fromString(operation.cityId)).orElse(null);
+            connection.commit();
+            return treasuryResult(operationId, city == null ? CityTreasuryCode.INTERNAL_ERROR : CityTreasuryCode.DEPOSITED, city);
+        }));
+    }
+
+    @Override
+    public CompletionStage<Void> failTreasuryDeposit(UUID operationId, boolean releasePending) {
+        return async(() -> {
+            try (Connection connection = connection()) {
+                updateTreasuryState(connection, operationId, releasePending ? "RESERVED" : "PREPARED",
+                        releasePending ? "RELEASE_PENDING" : "FAILED", "INTERNAL_ERROR");
+                return null;
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<Void> markTreasuryDepositReleased(UUID operationId) {
+        return async(() -> {
+            try (Connection connection = connection(); PreparedStatement update = connection.prepareStatement("""
+                    UPDATE city_operations SET state='RELEASED', updated_at=?
+                    WHERE operation_uuid=? AND operation_type='TREASURY_DEPOSIT' AND state='RELEASE_PENDING'
+                    """)) {
+                update.setString(1, Instant.now().toString());
+                update.setString(2, operationId.toString());
+                update.executeUpdate();
+                return null;
+            }
+        });
+    }
+
+    @Override
+    public CompletionStage<List<PendingTreasuryDeposit>> pendingTreasuryDeposits() {
+        return async(() -> {
+            List<PendingTreasuryDeposit> pending = new ArrayList<>();
+            try (Connection connection = connection(); PreparedStatement query = connection.prepareStatement("""
+                    SELECT operation_uuid, city_uuid, actor_uuid, state, request_payload
+                    FROM city_operations WHERE operation_type='TREASURY_DEPOSIT'
+                      AND state IN ('PREPARED','RESERVED','DOMAIN_COMMITTED','COMMIT_PENDING','RELEASE_PENDING')
+                    ORDER BY created_at
+                    """); ResultSet result = query.executeQuery()) {
+                while (result.next()) {
+                    String[] payload = result.getString("request_payload").split("\\n", -1);
+                    if (payload.length != 3) throw new SQLException("Invalid treasury deposit payload");
+                    pending.add(new PendingTreasuryDeposit(UUID.fromString(result.getString("operation_uuid")),
+                            UUID.fromString(result.getString("city_uuid")), UUID.fromString(result.getString("actor_uuid")),
+                            Long.parseLong(payload[2]), result.getString("state")));
+                }
+            }
+            return List.copyOf(pending);
+        });
+    }
+
+    @Override
+    public CompletionStage<List<CityTreasuryEntry>> treasuryHistory(UUID cityId, int limit) {
+        int boundedLimit = Math.max(1, Math.min(50, limit));
+        return async(() -> {
+            List<CityTreasuryEntry> entries = new ArrayList<>();
+            try (Connection connection = connection(); PreparedStatement query = connection.prepareStatement("""
+                    SELECT operation_uuid, amount, balance_after, reason, created_at
+                    FROM city_treasury_entries WHERE city_uuid=? ORDER BY created_at DESC LIMIT ?
+                    """)) {
+                query.setString(1, cityId.toString());
+                query.setInt(2, boundedLimit);
+                try (ResultSet result = query.executeQuery()) {
+                    while (result.next()) entries.add(new CityTreasuryEntry(UUID.fromString(result.getString("operation_uuid")),
+                            result.getLong("amount"), result.getLong("balance_after"), result.getString("reason"),
+                            Instant.parse(result.getString("created_at"))));
+                }
+            }
+            return List.copyOf(entries);
+        });
+    }
+
+    private String treasuryPayload(CityTreasuryDraft draft) {
+        return draft.cityId() + "\n" + draft.actorId() + "\n" + draft.amount();
+    }
+
+    private CityTreasuryResult treasuryResult(UUID operationId, CityTreasuryCode code, CityView city) {
+        return new CityTreasuryResult(operationId, code,
+                code == CityTreasuryCode.DEPOSITED ? Optional.ofNullable(city) : Optional.empty());
+    }
+
+    private void updateTreasuryState(Connection connection, UUID operationId, String expected, String state, String code)
+            throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE city_operations SET state=?, result_code=?, updated_at=?
+                WHERE operation_uuid=? AND operation_type='TREASURY_DEPOSIT' AND state=?
+                """)) {
+            update.setString(1, state);
+            update.setString(2, code);
+            update.setString(3, Instant.now().toString());
+            update.setString(4, operationId.toString());
+            update.setString(5, expected);
+            if (update.executeUpdate() != 1) {
+                ExistingOperation operation = findOperation(connection, operationId);
+                if (operation == null || !operation.type.equals("TREASURY_DEPOSIT") || !operation.state.equals(state)) {
+                    throw new SQLException("Treasury deposit journal changed unexpectedly");
+                }
+            }
+        }
+    }
+
+    private <T> T treasuryTransaction(SqlTransaction<T> action) throws SQLException {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try { return action.run(connection); }
+            catch (SQLException | RuntimeException error) { connection.rollback(); throw error; }
+        }
+    }
+
+    private void insertTreasuryEntry(Connection connection, UUID operationId, UUID cityId, long amount, String reason)
+            throws SQLException {
+        if (amount == 0) return;
+        long balanceAfter = readCity(connection, cityId).orElseThrow().treasury();
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT INTO city_treasury_entries(operation_uuid, city_uuid, amount, balance_after, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, operationId.toString());
+            insert.setString(2, cityId.toString());
+            insert.setLong(3, amount);
+            insert.setLong(4, balanceAfter);
+            insert.setString(5, reason);
+            insert.setString(6, Instant.now().toString());
+            insert.executeUpdate();
+        }
+    }
+
+    @Override
     public CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft) {
         return async(() -> {
             String payload = foundationPayload(draft);
@@ -802,19 +1085,25 @@ public final class SqliteCityRepository implements CityRepository {
                 return promotionResult(draft.operationId(), failure, null, false);
             }
             try (PreparedStatement update = connection.prepareStatement("""
-                    UPDATE cities SET stage=?, revision=revision+1
-                    WHERE city_uuid=? AND stage=? AND revision=?
+                    UPDATE cities SET stage=?, treasury=treasury-?, revision=revision+1
+                    WHERE city_uuid=? AND stage=? AND revision=? AND treasury>=?
                     """)) {
                 update.setString(1, draft.toStage().name());
-                update.setString(2, draft.cityId().toString());
-                update.setString(3, draft.fromStage().name());
-                update.setLong(4, draft.expectedRevision());
+                update.setLong(2, draft.price());
+                update.setString(3, draft.cityId().toString());
+                update.setString(4, draft.fromStage().name());
+                update.setLong(5, draft.expectedRevision());
+                update.setLong(6, draft.price());
                 if (update.executeUpdate() != 1) {
-                    setOperationState(connection, draft.operationId(), "RELEASE_PENDING", CityPromotionCode.STALE_REVISION);
+                    CityPromotionCode failureAfterCheck = promotionFailure(connection, draft);
+                    if (failureAfterCheck == null) failureAfterCheck = CityPromotionCode.STALE_REVISION;
+                    setOperationState(connection, draft.operationId(), "RELEASE_PENDING", failureAfterCheck);
                     connection.commit();
-                    return promotionResult(draft.operationId(), CityPromotionCode.STALE_REVISION, null, false);
+                    return promotionResult(draft.operationId(), failureAfterCheck, null, false);
                 }
             }
+            if (draft.price() > 0) insertTreasuryEntry(connection, draft.operationId(), draft.cityId(), -draft.price(),
+                    "STAGE_PROMOTION:" + draft.fromStage().name() + ":" + draft.toStage().name());
             setOperationState(connection, draft.operationId(), "DOMAIN_COMMITTED", CityPromotionCode.PROMOTED);
             CityView updated = readCity(connection, draft.cityId()).orElseThrow(() -> new SQLException("Promoted city disappeared"));
             connection.commit();
@@ -985,12 +1274,17 @@ public final class SqliteCityRepository implements CityRepository {
                 insert.executeUpdate();
             }
             try (PreparedStatement update = connection.prepareStatement("""
-                    UPDATE cities SET revision=revision+1 WHERE city_uuid=? AND revision=? AND stage<>'SETTLEMENT'
+                    UPDATE cities SET treasury=treasury-?, revision=revision+1
+                    WHERE city_uuid=? AND revision=? AND stage<>'SETTLEMENT' AND treasury>=?
                     """)) {
-                update.setString(1, draft.cityId().toString());
-                update.setLong(2, draft.expectedRevision());
-                if (update.executeUpdate() != 1) throw new SQLException("City changed while claiming chunk");
+                update.setLong(1, draft.price());
+                update.setString(2, draft.cityId().toString());
+                update.setLong(3, draft.expectedRevision());
+                update.setLong(4, draft.price());
+                if (update.executeUpdate() != 1) throw new SQLException("City changed or treasury balance changed while claiming chunk");
             }
+            if (draft.price() > 0) insertTreasuryEntry(connection, draft.operationId(), draft.cityId(), -draft.price(),
+                    "CHUNK_CLAIM:" + draft.target().worldId() + ":" + draft.target().x() + ":" + draft.target().z());
             setClaimState(connection, draft.operationId(), "DOMAIN_COMMITTED", CityClaimCode.CLAIMED);
             CityView updated = readCity(connection, draft.cityId()).orElseThrow(() -> new SQLException("Claimed city disappeared"));
             connection.commit();
@@ -1080,6 +1374,7 @@ public final class SqliteCityRepository implements CityRepository {
         if (city.chunks().size() >= city.stage().chunkLimit()) return CityClaimCode.CAP_REACHED;
         if (city.chunks().contains(draft.target())) return CityClaimCode.ALREADY_OWNED;
         if (city.chunks().stream().noneMatch(draft.target()::adjacentTo)) return CityClaimCode.DISCONNECTED;
+        if (city.treasury() < draft.price()) return CityClaimCode.INSUFFICIENT_TREASURY;
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT 1 FROM city_chunks WHERE world_uuid=? AND chunk_x=? AND chunk_z=?
                 """)) {
@@ -1182,6 +1477,7 @@ public final class SqliteCityRepository implements CityRepository {
         if (city.residents().size() < draft.minimumResidents() || city.chunks().size() < draft.minimumChunks()) {
             return CityPromotionCode.REQUIREMENTS_NOT_MET;
         }
+        if (city.treasury() < draft.price()) return CityPromotionCode.INSUFFICIENT_TREASURY;
         return null;
     }
 

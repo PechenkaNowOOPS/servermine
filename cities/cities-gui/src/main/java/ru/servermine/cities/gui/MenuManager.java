@@ -15,6 +15,7 @@ import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.api.ChunkPosition;
 import ru.servermine.cities.api.CityStage;
 import ru.servermine.cities.api.CityView;
+import ru.servermine.cities.api.CityTreasuryEntry;
 
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
@@ -48,6 +49,7 @@ public final class MenuManager {
     private final java.util.Map<java.util.UUID, PendingMemberKick> pendingMemberKicks = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, java.util.UUID> cityIds = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, CitySnapshot> cityViews = new java.util.HashMap<>();
+    private final java.util.Map<java.util.UUID, List<CityTreasuryEntry>> treasuryHistory = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, List<ChunkPosition>> purchaseTargets = new java.util.HashMap<>();
     private final java.util.Map<java.util.UUID, Integer> purchasePages = new java.util.HashMap<>();
 
@@ -66,6 +68,7 @@ public final class MenuManager {
         pendingMemberKicks.remove(player.getUniqueId());
         cityIds.remove(player.getUniqueId());
         cityViews.remove(player.getUniqueId());
+        treasuryHistory.remove(player.getUniqueId());
         purchaseTargets.remove(player.getUniqueId());
         purchasePages.remove(player.getUniqueId());
     }
@@ -116,6 +119,8 @@ public final class MenuManager {
                     player.sendMessage(Component.text("Не удалось загрузить город.", NamedTextColor.RED));
                 } else if (city.isEmpty()) {
                     showFounding(player, MenuType.FOUNDING, null);
+                } else if (type == MenuType.TREASURY) {
+                    openTreasury(player, city.get());
                 } else show(player, type, snapshot(city.get()), false, city.get().id());
             });
         });
@@ -134,9 +139,32 @@ public final class MenuManager {
                     new CitySnapshot.ResidentEntry(UUID.randomUUID(), "Witch", "Временный заместитель")));
         cityIds.remove(player.getUniqueId());
         cityViews.remove(player.getUniqueId());
+        treasuryHistory.remove(player.getUniqueId());
         purchaseTargets.remove(player.getUniqueId());
         purchasePages.remove(player.getUniqueId());
         show(player, type, city, true, null);
+    }
+
+    private void openTreasury(Player player, CityView city) {
+        var treasury = cities.treasuryService().orElse(null);
+        if (treasury == null || !treasury.isReady()) {
+            treasuryHistory.put(player.getUniqueId(), List.of());
+            show(player, MenuType.TREASURY, snapshot(city), false, city.id());
+            player.sendMessage(Component.text("История казны временно недоступна.", NamedTextColor.YELLOW));
+            return;
+        }
+        UUID requestId = UUID.randomUUID();
+        requests.put(player.getUniqueId(), requestId);
+        treasury.history(player.getUniqueId(), 5).whenComplete((entries, error) -> {
+            if (!plugin.isEnabled()) return;
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (!player.isOnline() || !requestId.equals(requests.get(player.getUniqueId()))) return;
+                requests.remove(player.getUniqueId());
+                treasuryHistory.put(player.getUniqueId(), error == null && entries != null ? entries : List.of());
+                show(player, MenuType.TREASURY, snapshot(city), false, city.id());
+                if (error != null) plugin.getLogger().warning("Cannot load treasury history: " + error);
+            });
+        });
     }
 
     private CitySnapshot snapshot(CityView city) {
@@ -186,7 +214,7 @@ public final class MenuManager {
             case PURCHASE -> renderPurchase(inv, city, playerId, preview);
             case PURCHASE_CONFIRM -> renderClaimConfirm(inv, city, playerId, preview);
             case UPGRADES -> renderUpgrades(inv, city);
-            case TREASURY -> renderTreasury(inv, city);
+            case TREASURY -> renderTreasury(inv, city, playerId);
             case RESIDENTS -> renderResidents(inv, city);
             case MEMBER_KICK_CONFIRM -> renderMemberKickConfirm(inv, playerId, preview);
             case MANAGEMENT -> renderManagement(inv, city);
@@ -370,6 +398,7 @@ public final class MenuManager {
             case STALE_REVISION -> "Состояние города изменилось. Откройте книгу заново.";
             case REQUIREMENTS_NOT_MET -> "Город пока не выполняет требования для перехода.";
             case INSUFFICIENT_FUNDS -> "Недостаточно монет для перехода.";
+            case INSUFFICIENT_TREASURY -> "В казне города недостаточно монет.";
             case ECONOMY_UNAVAILABLE -> "Экономика сейчас недоступна.";
             case OPERATION_CONFLICT -> "Операция конфликтует с предыдущим запросом.";
             case OPERATION_IN_PROGRESS, UNKNOWN_OUTCOME -> "Операция ещё не подтверждена. Не повторяйте оплату; обратитесь к администратору.";
@@ -451,8 +480,9 @@ public final class MenuManager {
                 "Мир: " + worldName, "Координаты: X " + pending.target.x() + ", Z " + pending.target.z(),
                 "Текущая территория: " + city.territory() + " / " + city.territoryLimit(),
                 "После покупки: " + (city.territory() + 1) + " / " + city.territoryLimit(),
-                "Стоимость: " + money(price), "Оплата: ваши физические монеты."));
-        inv.setItem(29, button(Material.LIME_CONCRETE, "Подтвердить покупку", "Чанк закрепится за городом после оплаты."));
+                "Стоимость: " + money(price), "Казна города: " + money(city.treasury()),
+                "Оплата: из казны города."));
+        inv.setItem(29, button(Material.LIME_CONCRETE, "Подтвердить покупку", "Средства спишутся из казны города."));
         inv.setItem(33, button(Material.RED_CONCRETE, "Отмена", "Вернуться к выбору чанка."));
         inv.setItem(45, button(Material.ARROW, "Назад", "Вернуться к выбору чанка."));
     }
@@ -471,12 +501,29 @@ public final class MenuManager {
         inv.setItem(45, back());
     }
 
-    private void renderTreasury(Inventory inv, CitySnapshot c) {
+    private void renderTreasury(Inventory inv, CitySnapshot c, UUID playerId) {
         inv.setItem(13, button(Material.GOLD_BLOCK, "Баланс города", money(c.treasury())));
-        inv.setItem(29, button(Material.EMERALD, "Пополнить казну", "Подключение к Economy — следующий этап."));
-        inv.setItem(38, button(Material.BOOK, "История операций", "Журнал казны ещё не подключён."));
-        inv.setItem(42, button(Material.PAPER, "Расходы города", "Просмотр городских расходов."));
+        List<CityTreasuryEntry> entries = treasuryHistory.getOrDefault(playerId, List.of());
+        int[] slots = {19, 20, 21, 22, 23};
+        for (int i = 0; i < Math.min(slots.length, entries.size()); i++) {
+            CityTreasuryEntry entry = entries.get(i);
+            String title = entry.amount() > 0 ? "+" + money(entry.amount()) : "−" + money(Math.abs(entry.amount()));
+            inv.setItem(slots[i], button(entry.amount() > 0 ? Material.EMERALD : Material.GOLD_NUGGET,
+                    title, treasuryReason(entry.reason()), "Баланс после: " + money(entry.balanceAfter()),
+                    entry.occurredAt().atZone(java.time.ZoneId.systemDefault())
+                            .format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))));
+        }
+        if (entries.isEmpty()) inv.setItem(21, button(Material.BOOK, "История операций", "Операций пока нет."));
+        inv.setItem(29, button(Material.EMERALD, "Пополнить казну", "Команда: /smcities treasury deposit <сумма>"));
+        inv.setItem(38, button(Material.BOOK, "История операций", "Показать последние записи: /smcities treasury history"));
         inv.setItem(45, back());
+    }
+
+    private String treasuryReason(String reason) {
+        if (reason.equals("DEPOSIT")) return "Пополнение казны";
+        if (reason.startsWith("CHUNK_CLAIM:")) return "Покупка городского чанка";
+        if (reason.startsWith("STAGE_PROMOTION:")) return "Развитие города";
+        return reason;
     }
 
     private void renderResidents(Inventory inv, CitySnapshot c) {
@@ -591,6 +638,15 @@ public final class MenuManager {
             player.sendMessage(Component.text("Пригласить онлайн-игрока: /smcities invite <игрок>", NamedTextColor.YELLOW));
         } else if (session.menuType() == MenuType.RESIDENTS && rawSlot == 41) {
             player.sendMessage(Component.text("Принять приглашение: /smcities accept", NamedTextColor.YELLOW));
+        } else if (session.menuType() == MenuType.TREASURY && rawSlot == 29) {
+            player.sendMessage(Component.text("Пополнить казну: /smcities treasury deposit <сумма>", NamedTextColor.YELLOW));
+        } else if (session.menuType() == MenuType.TREASURY && rawSlot == 38) {
+            List<CityTreasuryEntry> entries = treasuryHistory.getOrDefault(player.getUniqueId(), List.of());
+            if (entries.isEmpty()) player.sendMessage(Component.text("Операций в казне пока нет.", NamedTextColor.YELLOW));
+            else entries.forEach(entry -> player.sendMessage(Component.text(
+                    (entry.amount() > 0 ? "+" : "−") + money(Math.abs(entry.amount()))
+                            + " · " + treasuryReason(entry.reason()) + " · баланс " + money(entry.balanceAfter()),
+                    entry.amount() > 0 ? NamedTextColor.GREEN : NamedTextColor.GOLD)));
         } else {
             player.sendMessage(Component.text("Этот раздел пока доступен только для просмотра.", NamedTextColor.YELLOW));
         }
@@ -728,7 +784,7 @@ public final class MenuManager {
                     player.sendMessage(Component.text("Не удалось подтвердить результат покупки. Не повторяйте оплату; обратитесь к администратору.", NamedTextColor.RED));
                     plugin.getLogger().warning("City chunk claim failed for operation " + pending.operationId + ": " + error);
                 } else if (result.code() == CityClaimCode.CLAIMED || result.code() == CityClaimCode.REPLAYED) {
-                    String paid = service.chunkPrice() == 0 ? "Бесплатно." : "Списано: " + money(service.chunkPrice()) + ".";
+                    String paid = service.chunkPrice() == 0 ? "Бесплатно." : "Из казны списано: " + money(service.chunkPrice()) + ".";
                     player.sendMessage(Component.text("Чанк закреплён за городом. " + paid, NamedTextColor.GREEN));
                     open(player, MenuType.TERRITORY);
                 } else {
@@ -751,7 +807,8 @@ public final class MenuManager {
             case TARGET_UNAVAILABLE -> "Чанк недоступен или уже занят другим городом.";
             case PROTECTED_ZONE -> "Этот чанк находится в защищённой зоне.";
             case DISCONNECTED -> "Выберите чанк рядом с существующей территорией города.";
-            case INSUFFICIENT_FUNDS -> "Недостаточно физических монет.";
+            case INSUFFICIENT_FUNDS -> "Недостаточно монет.";
+            case INSUFFICIENT_TREASURY -> "В казне города недостаточно монет. Пополните её через меню казны.";
             case ECONOMY_UNAVAILABLE -> "Экономика сейчас недоступна.";
             case OPERATION_CONFLICT -> "Операция конфликтует с предыдущим запросом.";
             case OPERATION_IN_PROGRESS, UNKNOWN_OUTCOME -> "Покупка ещё не подтверждена. Не повторяйте оплату; обратитесь к администратору.";
