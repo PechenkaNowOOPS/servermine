@@ -12,6 +12,8 @@ import ru.servermine.cities.api.CityClaimCode;
 import ru.servermine.cities.api.CityClaimResult;
 import ru.servermine.cities.api.CityLeaveCode;
 import ru.servermine.cities.api.CityLeaveResult;
+import ru.servermine.cities.api.CityMembershipCode;
+import ru.servermine.cities.api.CityMembershipResult;
 import ru.servermine.cities.core.CityRepository;
 import ru.servermine.cities.core.CityPromotionDraft;
 import ru.servermine.cities.core.CityClaimDraft;
@@ -35,6 +37,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
@@ -45,7 +48,7 @@ import java.util.HashSet;
  * world and inventory access are intentionally absent from this module.
  */
 public final class SqliteCityRepository implements CityRepository {
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
 
     private final String jdbcUrl;
     private final int busyTimeoutMillis;
@@ -73,7 +76,11 @@ public final class SqliteCityRepository implements CityRepository {
             if (version > SCHEMA_VERSION) {
                 throw new SQLException("Cities database schema " + version + " is newer than supported " + SCHEMA_VERSION);
             }
-            if (version == 0) createVersionOne(connection);
+            if (version == 0) {
+                createVersionOne(connection);
+                version = 1;
+            }
+            if (version == 1) createVersionTwo(connection);
         }
     }
 
@@ -141,11 +148,35 @@ public final class SqliteCityRepository implements CityRepository {
                     )
                     """);
             statement.execute("CREATE INDEX idx_city_treasury_history ON city_treasury_entries(city_uuid, created_at)");
-            statement.execute("PRAGMA user_version=" + SCHEMA_VERSION);
+            statement.execute("PRAGMA user_version=1");
             connection.commit();
         } catch (SQLException e) {
             connection.rollback();
             throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    private void createVersionTwo(Connection connection) throws SQLException {
+        connection.setAutoCommit(false);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("""
+                    CREATE TABLE city_invites (
+                        player_uuid TEXT PRIMARY KEY,
+                        city_uuid TEXT NOT NULL REFERENCES cities(city_uuid) ON DELETE CASCADE,
+                        inviter_uuid TEXT NOT NULL,
+                        player_name TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    )
+                    """);
+            statement.execute("CREATE INDEX idx_city_invites_city ON city_invites(city_uuid)");
+            statement.execute("PRAGMA user_version=2");
+            connection.commit();
+        } catch (SQLException error) {
+            connection.rollback();
+            throw error;
         } finally {
             connection.setAutoCommit(true);
         }
@@ -264,6 +295,144 @@ public final class SqliteCityRepository implements CityRepository {
                 throw error;
             }
         }
+    }
+
+    @Override
+    public CompletionStage<CityMembershipResult> inviteToCity(UUID inviterId, UUID inviteeId, String inviteeName) {
+        return async(() -> inviteToCityTransaction(inviterId, inviteeId, inviteeName));
+    }
+
+    private CityMembershipResult inviteToCityTransaction(UUID inviterId, UUID inviteeId, String inviteeName)
+            throws SQLException {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                UUID cityId = null;
+                String role = null;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT city_uuid, role_id FROM city_members WHERE player_uuid = ?")) {
+                    query.setString(1, inviterId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next()) {
+                            cityId = UUID.fromString(result.getString("city_uuid"));
+                            role = result.getString("role_id");
+                        }
+                    }
+                }
+                if (cityId == null) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.NO_CITY);
+                }
+                if (!"RULER".equals(role)) {
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.PERMISSION_DENIED);
+                }
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT 1 FROM city_members WHERE player_uuid = ?")) {
+                    query.setString(1, inviteeId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next()) {
+                            connection.commit();
+                            return membershipResult(CityMembershipCode.TARGET_ALREADY_IN_CITY);
+                        }
+                    }
+                }
+                Instant now = Instant.now();
+                try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO city_invites(player_uuid, city_uuid, inviter_uuid, player_name, created_at, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(player_uuid) DO UPDATE SET city_uuid=excluded.city_uuid,
+                            inviter_uuid=excluded.inviter_uuid, player_name=excluded.player_name,
+                            created_at=excluded.created_at, expires_at=excluded.expires_at
+                        """)) {
+                    insert.setString(1, inviteeId.toString());
+                    insert.setString(2, cityId.toString());
+                    insert.setString(3, inviterId.toString());
+                    insert.setString(4, inviteeName);
+                    insert.setString(5, now.toString());
+                    insert.setString(6, now.plus(48, ChronoUnit.HOURS).toString());
+                    insert.executeUpdate();
+                }
+                CityView city = readCity(connection, cityId).orElseThrow(
+                        () -> new SQLException("City disappeared while inviting a member"));
+                connection.commit();
+                return new CityMembershipResult(CityMembershipCode.INVITED, Optional.of(city));
+            } catch (SQLException | RuntimeException error) {
+                connection.rollback();
+                throw error;
+            }
+        }
+    }
+
+    @Override
+    public CompletionStage<CityMembershipResult> acceptCityInvite(UUID playerId, String playerName) {
+        return async(() -> acceptCityInviteTransaction(playerId, playerName));
+    }
+
+    private CityMembershipResult acceptCityInviteTransaction(UUID playerId, String playerName) throws SQLException {
+        try (Connection connection = connection()) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT 1 FROM city_members WHERE player_uuid = ?")) {
+                    query.setString(1, playerId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next()) {
+                            connection.commit();
+                            return membershipResult(CityMembershipCode.ALREADY_IN_CITY);
+                        }
+                    }
+                }
+                UUID cityId = null;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT city_uuid, expires_at FROM city_invites WHERE player_uuid = ?")) {
+                    query.setString(1, playerId.toString());
+                    try (ResultSet result = query.executeQuery()) {
+                        if (result.next() && Instant.parse(result.getString("expires_at")).isAfter(Instant.now())) {
+                            cityId = UUID.fromString(result.getString("city_uuid"));
+                        }
+                    }
+                }
+                if (cityId == null) {
+                    try (PreparedStatement delete = connection.prepareStatement("DELETE FROM city_invites WHERE player_uuid = ?")) {
+                        delete.setString(1, playerId.toString());
+                        delete.executeUpdate();
+                    }
+                    connection.commit();
+                    return membershipResult(CityMembershipCode.NOT_INVITED);
+                }
+                try (PreparedStatement insert = connection.prepareStatement("""
+                        INSERT INTO city_members(city_uuid, player_uuid, last_known_name, role_id, joined_at)
+                        VALUES (?, ?, ?, 'RESIDENT', ?)
+                        """)) {
+                    insert.setString(1, cityId.toString());
+                    insert.setString(2, playerId.toString());
+                    insert.setString(3, playerName);
+                    insert.setString(4, Instant.now().toString());
+                    insert.executeUpdate();
+                }
+                try (PreparedStatement delete = connection.prepareStatement("DELETE FROM city_invites WHERE player_uuid = ?")) {
+                    delete.setString(1, playerId.toString());
+                    delete.executeUpdate();
+                }
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE cities SET revision = revision + 1 WHERE city_uuid = ?")) {
+                    update.setString(1, cityId.toString());
+                    if (update.executeUpdate() != 1) throw new SQLException("City disappeared while accepting invite");
+                }
+                CityView city = readCity(connection, cityId).orElseThrow(
+                        () -> new SQLException("City disappeared after invitation acceptance"));
+                connection.commit();
+                return new CityMembershipResult(CityMembershipCode.ACCEPTED, Optional.of(city));
+            } catch (SQLException | RuntimeException error) {
+                connection.rollback();
+                throw error;
+            }
+        }
+    }
+
+    private CityMembershipResult membershipResult(CityMembershipCode code) {
+        return new CityMembershipResult(code, Optional.empty());
     }
 
     @Override

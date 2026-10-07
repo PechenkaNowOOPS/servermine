@@ -8,4 +8,8 @@ public interface CityMembershipService {
     boolean isReady();
 
     CompletionStage<CityLeaveResult> leave(UUID playerId);
+
+    CompletionStage<CityMembershipResult> invite(UUID inviterId, UUID inviteeId, String inviteeName);
+
+    CompletionStage<CityMembershipResult> accept(UUID playerId, String playerName);
 }

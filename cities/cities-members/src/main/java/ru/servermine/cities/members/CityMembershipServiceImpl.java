@@ -2,6 +2,8 @@ package ru.servermine.cities.members;
 
 import ru.servermine.cities.api.CityLeaveCode;
 import ru.servermine.cities.api.CityLeaveResult;
+import ru.servermine.cities.api.CityMembershipCode;
+import ru.servermine.cities.api.CityMembershipResult;
 import ru.servermine.cities.api.CityMembershipService;
 import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.core.CityRepository;
@@ -38,7 +40,34 @@ public final class CityMembershipServiceImpl implements CityMembershipService {
         }).exceptionally(error -> completed(CityLeaveCode.INTERNAL_ERROR).toCompletableFuture().join());
     }
 
+    @Override
+    public CompletionStage<CityMembershipResult> invite(UUID inviterId, UUID inviteeId, String inviteeName) {
+        Objects.requireNonNull(inviterId, "inviterId");
+        Objects.requireNonNull(inviteeId, "inviteeId");
+        Objects.requireNonNull(inviteeName, "inviteeName");
+        if (!ready) return membershipResult(CityMembershipCode.SERVICE_UNAVAILABLE);
+        if (inviteeName.isBlank() || inviteeName.length() > 64) return membershipResult(CityMembershipCode.INTERNAL_ERROR);
+        return repository.inviteToCity(inviterId, inviteeId, inviteeName).exceptionally(
+                error -> new CityMembershipResult(CityMembershipCode.INTERNAL_ERROR, Optional.empty()));
+    }
+
+    @Override
+    public CompletionStage<CityMembershipResult> accept(UUID playerId, String playerName) {
+        Objects.requireNonNull(playerId, "playerId");
+        Objects.requireNonNull(playerName, "playerName");
+        if (!ready) return membershipResult(CityMembershipCode.SERVICE_UNAVAILABLE);
+        if (playerName.isBlank() || playerName.length() > 64) return membershipResult(CityMembershipCode.INTERNAL_ERROR);
+        return repository.acceptCityInvite(playerId, playerName).thenApply(result -> {
+            if (result.code() == CityMembershipCode.ACCEPTED) result.city().ifPresent(cityChanged);
+            return result;
+        }).exceptionally(error -> new CityMembershipResult(CityMembershipCode.INTERNAL_ERROR, Optional.empty()));
+    }
+
     private CompletionStage<CityLeaveResult> completed(CityLeaveCode code) {
         return CompletableFuture.completedFuture(new CityLeaveResult(code, Optional.empty(), Optional.empty()));
+    }
+
+    private CompletionStage<CityMembershipResult> membershipResult(CityMembershipCode code) {
+        return CompletableFuture.completedFuture(new CityMembershipResult(code, Optional.empty()));
     }
 }
