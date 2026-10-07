@@ -9,7 +9,9 @@ public enum MenuType {
     RESIDENTS('\uE006', "Жители"),
     MANAGEMENT('\uE007', "Управление"),
     DIPLOMACY('\uE008', "Дипломатия"),
-    MARKET('\u0000', "Рынок");
+    MARKET('\u0000', "Рынок"),
+    FOUNDING('\u0000', "Основание города"),
+    FOUNDING_CONFIRM('\u0000', "Подтверждение основания");
 
     private final char glyph;
     private final String fallbackTitle;

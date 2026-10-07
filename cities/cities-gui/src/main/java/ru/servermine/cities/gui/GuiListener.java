@@ -1,11 +1,13 @@
 package ru.servermine.cities.gui;
 
+import io.papermc.paper.event.player.AsyncChatEvent;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.inventory.*;
 import org.bukkit.event.player.*;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -42,7 +44,16 @@ public final class GuiListener implements Listener {
     @EventHandler public void onClose(InventoryCloseEvent event) {
         if (event.getPlayer() instanceof Player player) menus.forget(player);
     }
-    @EventHandler public void onQuit(PlayerQuitEvent event) { menus.forget(event.getPlayer()); }
+    @EventHandler public void onQuit(PlayerQuitEvent event) { menus.clearPlayer(event.getPlayer()); }
+    @EventHandler public void onCityNameChat(AsyncChatEvent event) {
+        Player player = event.getPlayer();
+        if (!menus.isAwaitingCityName(player.getUniqueId())) return;
+        event.setCancelled(true);
+        String input = PlainTextComponentSerializer.plainText().serialize(event.message());
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (player.isOnline()) menus.acceptCityName(player, input);
+        });
+    }
     @EventHandler public void onDrop(PlayerDropItemEvent event) {
         if (event.getPlayer().getOpenInventory().getTopInventory().getHolder() instanceof MenuHolder) event.setCancelled(true);
     }
