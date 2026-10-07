@@ -7,6 +7,7 @@ import ru.servermine.cities.api.CityPromotionResult;
 import ru.servermine.cities.api.CityClaimResult;
 
 import java.util.Optional;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
@@ -16,6 +17,8 @@ public interface CityRepository {
     CompletionStage<Optional<CityView>> find(UUID cityId);
 
     CompletionStage<Optional<CityView>> findForPlayer(UUID playerId);
+
+    CompletionStage<List<CityView>> findAllCities();
 
     CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft);
 

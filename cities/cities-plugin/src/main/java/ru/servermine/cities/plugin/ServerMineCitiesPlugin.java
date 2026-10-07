@@ -9,6 +9,8 @@ import ru.servermine.cities.core.PersistedCitiesService;
 import ru.servermine.cities.storage.SqliteCityRepository;
 import ru.servermine.cities.creation.CityFoundingServiceImpl;
 import ru.servermine.cities.protection.BukkitFoundationPolicy;
+import ru.servermine.cities.protection.CityProtectionIndex;
+import ru.servermine.cities.protection.CityProtectionListener;
 import ru.servermine.cities.progression.CityProgressionServiceImpl;
 import ru.servermine.cities.progression.StagePromotionPolicy;
 import ru.servermine.cities.territory.CityTerritoryServiceImpl;
@@ -44,20 +46,24 @@ public final class ServerMineCitiesPlugin extends JavaPlugin {
             SqliteCityRepository repository = new SqliteCityRepository(database, busyTimeout, databaseExecutor);
             repository.initialize();
 
+            CityProtectionIndex protectionIndex = new CityProtectionIndex();
+            protectionIndex.replaceAll(repository.findAllCities().toCompletableFuture().join());
             BukkitFoundationPolicy protection = new BukkitFoundationPolicy(this, loadSystemZones());
-            cityFoundingService = new CityFoundingServiceImpl(repository, protection);
+            cityFoundingService = new CityFoundingServiceImpl(repository, protection, protectionIndex::replaceCity);
             EconomyService economy = getServer().getServicesManager().load(EconomyService.class);
             cityProgressionService = new CityProgressionServiceImpl(repository, economy, loadPromotionPolicies());
             cityTerritoryService = new CityTerritoryServiceImpl(repository, economy,
                     getConfig().getLong("territory.chunk-price", 750),
                     target -> protection.checkTarget(target).thenApply(decision -> decision == ru.servermine.cities.protection.FoundationDecision.ALLOWED),
-                    protection::checkTargets);
+                    protection::checkTargets, protectionIndex::replaceCity);
             citiesService = new PersistedCitiesService(repository, cityFoundingService, cityProgressionService,
                     cityTerritoryService);
             getServer().getServicesManager().register(CitiesService.class, citiesService, this, ServicePriority.Normal);
             CityBookService books = new CityBookService(this);
             MenuManager menus = new MenuManager(this, citiesService);
             getServer().getPluginManager().registerEvents(new GuiListener(this, books, menus), this);
+            getServer().getPluginManager().registerEvents(new CityProtectionListener(this, protectionIndex), this);
+            getLogger().info("City protection cache loaded: " + protectionIndex.claimCount() + " claimed chunks.");
             Objects.requireNonNull(getCommand("smcities"), "smcities command is missing")
                     .setExecutor(new CitiesAdminCommand(citiesService, books, menus));
 

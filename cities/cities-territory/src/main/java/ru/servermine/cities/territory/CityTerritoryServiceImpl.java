@@ -25,6 +25,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Function;
+import java.util.function.Consumer;
 
 /** Durable claim workflow. The Economy payment is always owned by the requesting ruler. */
 public final class CityTerritoryServiceImpl implements CityTerritoryService {
@@ -37,17 +38,20 @@ public final class CityTerritoryServiceImpl implements CityTerritoryService {
     private final long price;
     private final Function<ChunkPosition, CompletionStage<Boolean>> checkTarget;
     private final Function<Set<ChunkPosition>, CompletionStage<List<ChunkPosition>>> checkTargets;
+    private final Consumer<CityView> cityChanged;
     private volatile boolean ready = true;
 
     public CityTerritoryServiceImpl(CityRepository repository, EconomyService economy, long price,
                                     Function<ChunkPosition, CompletionStage<Boolean>> checkTarget,
-                                    Function<Set<ChunkPosition>, CompletionStage<List<ChunkPosition>>> checkTargets) {
+                                    Function<Set<ChunkPosition>, CompletionStage<List<ChunkPosition>>> checkTargets,
+                                    Consumer<CityView> cityChanged) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.economy = economy;
         if (price < 0) throw new IllegalArgumentException("territory chunk price cannot be negative");
         this.price = price;
         this.checkTarget = Objects.requireNonNull(checkTarget, "checkTarget");
         this.checkTargets = Objects.requireNonNull(checkTargets, "checkTargets");
+        this.cityChanged = Objects.requireNonNull(cityChanged, "cityChanged");
     }
 
     public void deactivate() { ready = false; }
@@ -133,6 +137,7 @@ public final class CityTerritoryServiceImpl implements CityTerritoryService {
     private CompletionStage<CityClaimResult> applyPrepared(CityClaimDraft draft) {
         return repository.applyClaim(draft).thenCompose(applied -> {
             if (applied.code() == CityClaimCode.CLAIMED || applied.code() == CityClaimCode.REPLAYED) {
+                applied.city().ifPresent(cityChanged);
                 if (price == 0) return repository.completeClaim(draft.operationId()).thenApply(done -> claimed(draft.operationId(), done));
                 return economy.commit(draft.operationId()).thenCompose(commit -> {
                     if (commit.code() == ResultCode.OK && commit.state() == OperationState.COMMITTED) {

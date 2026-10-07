@@ -5,6 +5,7 @@ import ru.servermine.cities.api.CityFoundationDraft;
 import ru.servermine.cities.api.CityFoundationRequest;
 import ru.servermine.cities.api.CityFoundationResult;
 import ru.servermine.cities.api.CityFoundingService;
+import ru.servermine.cities.api.CityView;
 import ru.servermine.cities.api.ChunkPosition;
 import ru.servermine.cities.core.CityRepository;
 import ru.servermine.cities.protection.FoundationDecision;
@@ -19,16 +20,23 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Consumer;
 
 /** Idempotent policy + persistence orchestration for free Settlement founding. */
 public final class CityFoundingServiceImpl implements CityFoundingService {
     private final CityRepository repository;
     private final FoundationPolicy policy;
+    private final Consumer<CityView> cityChanged;
     private volatile boolean ready = true;
 
     public CityFoundingServiceImpl(CityRepository repository, FoundationPolicy policy) {
+        this(repository, policy, ignored -> { });
+    }
+
+    public CityFoundingServiceImpl(CityRepository repository, FoundationPolicy policy, Consumer<CityView> cityChanged) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.policy = Objects.requireNonNull(policy, "policy");
+        this.cityChanged = Objects.requireNonNull(cityChanged, "cityChanged");
     }
 
     public void deactivate() {
@@ -70,6 +78,10 @@ public final class CityFoundingServiceImpl implements CityFoundingService {
                 }
                 return repository.found(draft);
             });
+        }).thenApply(result -> {
+            if ((result.code() == CityFoundationCode.CREATED || result.code() == CityFoundationCode.REPLAYED)
+                    && result.city().isPresent()) cityChanged.accept(result.city().get());
+            return result;
         }).exceptionally(error -> new CityFoundationResult(request.operationId(), CityFoundationCode.INTERNAL_ERROR,
                 Optional.empty(), false));
     }

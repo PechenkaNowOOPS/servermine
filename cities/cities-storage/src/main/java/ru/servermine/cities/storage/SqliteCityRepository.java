@@ -177,6 +177,21 @@ public final class SqliteCityRepository implements CityRepository {
     }
 
     @Override
+    public CompletionStage<List<CityView>> findAllCities() {
+        return async(() -> {
+            try (Connection connection = connection(); Statement query = connection.createStatement();
+                 ResultSet rows = query.executeQuery("SELECT city_uuid FROM cities ORDER BY name_key")) {
+                List<CityView> cities = new ArrayList<>();
+                while (rows.next()) {
+                    UUID cityId = UUID.fromString(rows.getString("city_uuid"));
+                    readCity(connection, cityId).ifPresent(cities::add);
+                }
+                return List.copyOf(cities);
+            }
+        });
+    }
+
+    @Override
     public CompletionStage<Optional<CityFoundationResult>> findFoundationReplay(CityFoundationDraft draft) {
         return async(() -> {
             String payload = foundationPayload(draft);
