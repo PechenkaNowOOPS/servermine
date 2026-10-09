@@ -3,6 +3,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.api.tasks.testing.Test
 
 plugins { base }
+
 allprojects {
     group = "ru.servermine"
     version = "0.1.0-SNAPSHOT"
@@ -12,7 +13,6 @@ allprojects {
     }
 }
 subprojects {
-    // Grouping projects carry no code or artifacts.
     if (path.count { it == ':' } >= 2 || name == "examples") {
         apply(plugin = "java-library")
         extensions.configure<JavaPluginExtension> {
@@ -32,39 +32,19 @@ subprojects {
         tasks.withType<ProcessResources>().configureEach { filteringCharset = "UTF-8" }
     }
 }
-val resourcePack = tasks.register<Zip>("resourcePack") {
-    from("resource-pack") { exclude("README.md") }
-    archiveFileName.set("ServerMine-ResourcePack.zip")
-    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
-    isPreserveFileTimestamps = false
-    isReproducibleFileOrder = true
-}
-tasks.assemble { dependsOn(resourcePack) }
-
-val repositoryDirectory = layout.projectDirectory.asFile
-val releaseVersion = version.toString()
 val verifyPackaging = tasks.register("verifyPackaging") {
     group = "verification"
-    description = "Checks plugin boundaries and ensures prototype data is excluded from runtime jars."
-    dependsOn(":economy:economy-plugin:jar", ":cities:cities-plugin:jar", resourcePack)
+    description = "Verify standalone Economy plugin packaging."
+    dependsOn(":economy:economy-plugin:jar")
     doLast {
-        fun entries(relative: String): Set<String> = java.util.zip.ZipFile(repositoryDirectory.resolve(relative)).use { zip ->
+        val jarFile = layout.projectDirectory.file("economy/economy-plugin/build/libs/ServerMineEconomy-${version}.jar").asFile
+        val entries = java.util.zip.ZipFile(jarFile).use { zip ->
             zip.entries().asSequence().map { it.name }.toSet()
         }
-        val economy = entries("economy/economy-plugin/build/libs/ServerMineEconomy-$releaseVersion.jar")
-        val cities = entries("cities/cities-plugin/build/libs/ServerMineCities-$releaseVersion.jar")
-        val pack = entries("build/distributions/ServerMine-ResourcePack.zip")
-        check("plugin.yml" in economy && "plugin.yml" in cities)
-        check("ru/servermine/economy/api/EconomyService.class" in economy)
-        check("ru/servermine/economy/internal/ServerMineEconomyPlugin.class" in economy)
-        check("ru/servermine/cities/api/CitiesService.class" in cities)
-        check("ru/servermine/cities/plugin/ServerMineCitiesPlugin.class" in cities)
-        check("ru/servermine/cities/territory/ClaimRules.class" in cities)
-        check(cities.none { it.startsWith("ru/servermine/economy/") }) { "Cities must not bundle Economy classes" }
-        check(economy.none { it.startsWith("ru/servermine/cities/") }) { "Economy must not bundle Cities classes" }
-        check(cities.none { it.contains("DemoCityRepository") || it.startsWith("ru/servermine/gradostroygui/") || it == "demo-city.yml" })
-        check("pack.mcmeta" in pack && "assets/gradostroy/font/gui.json" in pack)
-        check(pack.count { it.startsWith("assets/gradostroy/textures/font/gui/") && it.endsWith(".png") } == 8)
+        check("plugin.yml" in entries)
+        check("ru/servermine/economy/api/EconomyService.class" in entries)
+        check("ru/servermine/economy/internal/ServerMineEconomyPlugin.class" in entries)
+        check(entries.none { it.startsWith("ru/servermine/cities/") || it.startsWith("ru/servermine/gradostroygui/") })
     }
 }
 tasks.check { dependsOn(verifyPackaging) }

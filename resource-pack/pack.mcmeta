@@ -1,7 +1,0 @@
-{
-  "pack": {
-    "description": "GradostroyGUI — пиксельная книга управления городом",
-    "min_format": [88, 0],
-    "max_format": [88, 0]
-  }
-}

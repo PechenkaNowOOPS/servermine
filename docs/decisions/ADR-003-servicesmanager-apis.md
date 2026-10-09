@@ -1,9 +1,9 @@
-# ADR-003: публикация API через ServicesManager
+# ADR-003: Economy API через ServicesManager
 
-Статус: принято из исходного задания.
+**Статус:** принято.
 
-Плагины получают EconomyService и CitiesService через Bukkit ServicesManager. Контракты размещены в маленьких отдельных API-модулях.
-Потребители используют compileOnly и plugin.yml depend; API-классы поставляет ровно один runtime-владелец.
+`ServerMineEconomy` регистрирует `EconomyService` через Bukkit `ServicesManager`. Публичный `economy-api` поставляется внутри серверного Economy JAR; потребители указывают `compileOnly(economy-api)` и `depend: [ServerMineEconomy]` и не включают вторую копию API в свой JAR.
 
-Следствие: Cities JAR не содержит копию Economy API. API не раскрывает SQLite, репозитории, обработчики событий и изменяемые внутренние объекты.
-Отсутствие либо readiness=false сервиса должно запрещать зависимые мутации. На disable регистрации снимаются.
+API не раскрывает SQLite, внутренние репозитории или изменяемые сущности. Если сервис отсутствует либо `isReady() == false`, денежная операция не допускается. На отключении сервиса регистрация снимается.
+
+`CitiesService` и прочие игровые домены реализуются отдельно в соответствующих репозиториях.

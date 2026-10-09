@@ -1,4 +1,4 @@
-name: Build
+name: Economy Build
 on:
   push:
   pull_request:
@@ -17,11 +17,8 @@ jobs:
         run: ./gradlew --no-daemon projects clean build
       - uses: actions/upload-artifact@v4
         with:
-          name: servermine
-          path: |
-            economy/economy-plugin/build/libs/ServerMineEconomy-*.jar
-            cities/cities-plugin/build/libs/ServerMineCities-*.jar
-            build/distributions/ServerMine-ResourcePack.zip
+          name: ServerMineEconomy
+          path: economy/economy-plugin/build/libs/ServerMineEconomy-*.jar
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

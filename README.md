@@ -1,85 +1,49 @@
-# ServerMine
+# ServerMineEconomy
 
-Основа серверных плагинов **ServerMineEconomy** и **ServerMineCities / Градострой**.
-Репозиторий подготовлен для дальнейшей разработки на Java 25 и Purpur 26.2.
+Самостоятельный плагин физической экономики для Minecraft Java Edition (Elementra), Purpur/Paper 26.2 и Java 25.
 
-## Что сейчас работает
+Репозиторий содержит **только экономическую систему**: валюту, API, операции, тесты, документацию и примеры интеграции. Градострой разрабатывается отдельно в [servermine-cities](https://github.com/PechenkaNowOOPS/servermine-cities).
 
-| Часть | Состояние |
-|---|---|
-| Economy | Импортирована реализация физических монет, HMAC/PDC, SQLite-журнала, reserve/commit/release и административных команд. Добавлены регрессионные тесты и исправлена гонка возврата. |
-| Cities API и доменные правила | Неизменяемые модели, этапы 4/12/24/40/64, начальная область 2×2, проверка соседства, ревизии, занятости и защищённых зон. |
-| Cities runtime | Один JAR собирает 16 модулей. Публикуется API с `isReady() == false`, пока не реализованы хранилище и рабочие сценарии. |
-| GUI | Книга, навигация, защищённые инвентари и административный предпросмотр. Покупки и остальные изменения состояния отключены. |
-| Resource pack | Сохранены исходные 8 экранов и общий концепт. Числа/имена нарисованы внутри PNG, поэтому эти фоны разрешены только в предпросмотре. |
+## Реализовано в исходниках
 
-Это подготовленный **bootstrap**, а не завершённый городской плагин для игрового сервера.
-SQLite-хранилище Cities, основание города, реальные claims, казна, права, улучшения, рынок и дипломатия ещё требуют реализации.
+- Физические монеты (`ItemStack`) с номиналами из конфигурации, проверкой PDC/HMAC и ключом `currency.secret`.
+- `EconomyService` через Bukkit `ServicesManager`: баланс, `charge`, `payout`, `reserve`, `commit`, `release`, получение операции.
+- SQLite-журнал, идемпотентность по UUID, `PREPARED/RESERVED/RELEASING/COMMITTED/RELEASED/FAILED/UNKNOWN`.
+- Защита от повторной выплаты резерва и переполнения денежной суммы, регрессионные unit-тесты.
+- Административные команды `/smeconomy`; обязательных игровых команд нет.
+
+**Статус:** имеются исходники и автономные тесты. Runtime-проверки на настоящем сервере, аварийное завершение JVM и сверка playerdata с SQLite ещё требуют подтверждения. Не объявлять плагин release-ready по одному исходному коду.
 
 ## Сборка
 
-Нужен **JDK 25**; установите `JAVA_HOME` на его каталог. Gradle устанавливать отдельно не нужно:
-Wrapper 9.7.1 включён в Git, его дистрибутив защищён SHA-256. Для первого запуска требуется интернет.
+Нужен JDK 25. Linux/macOS: `./gradlew clean build`; Windows PowerShell: `.\gradlew.bat clean build`.
 
-Windows PowerShell:
-
-```powershell
-java -version
-.\gradlew.bat projects
-.\gradlew.bat clean build
-```
-
-Linux/macOS:
-
-```bash
-./gradlew projects
-./gradlew clean build
-```
-
-Версии Purpur API и SQLite закреплены в [gradle.properties](gradle.properties).
-Все модули компилируются под Java 25. Предыдущая настройка Economy API `release=21` приведена к единой целевой версии.
-
-Результаты:
-
-| Файл | Назначение |
+| Результат | Назначение |
 |---|---|
-| `economy/economy-plugin/build/libs/ServerMineEconomy-0.1.0-SNAPSHOT.jar` | Отдельный серверный плагин Economy; включает Economy API |
-| `cities/cities-plugin/build/libs/ServerMineCities-0.1.0-SNAPSHOT.jar` | Единственный серверный плагин Cities; включает все внутренние Cities-модули |
-| `economy/economy-api/build/libs/economy-api-0.1.0-SNAPSHOT.jar` | Compile-only библиотека для внешних потребителей |
-| `cities/cities-api/build/libs/cities-api-0.1.0-SNAPSHOT.jar` | Compile-only библиотека Cities |
-| `build/distributions/ServerMine-ResourcePack.zip` | Собранный ресурспак |
+| `economy/economy-plugin/build/libs/ServerMineEconomy-0.1.0-SNAPSHOT.jar` | Единственный серверный JAR для `plugins/` |
+| `economy/economy-api/build/libs/economy-api-0.1.0-SNAPSHOT.jar` | Compile-only API для разработчиков, не устанавливать в `plugins/` |
 
-API-JAR и внутренние модули **не нужно** класть в серверную папку `plugins`.
+`examples` — исходники примеров обращения к Economy API, а не рабочие серверные плагины.
 
-## Проверка на тестовом сервере
+## Установка и безопасность
 
-1. Подготовить отдельный Purpur 26.2 на Java 25.
-2. Положить только два серверных JAR в `plugins/`; прежний GradostroyGUI одновременно не устанавливать.
-3. Перезапустить сервер. Economy загрузит SQLite через `plugin.yml/libraries`.
-4. Проверить `/smeconomy status` и `/smcities status` от администратора.
-5. Выдать книгу: `/smcities givebook <игрок>`. ПКМ сообщает о недоступности Cities, пока рабочий сервис не подключён.
-6. Посмотреть макет: `/smcities preview <игрок> MAIN`. Доступны также TERRITORY, PURCHASE, UPGRADES, TREASURY, RESIDENTS, MANAGEMENT, DIPLOMACY, MARKET.
-7. Для проверки PNG установить ресурспак и включить `visual.use-pixel-backgrounds` в конфигурации Cities с перезапуском. По умолчанию используются ванильные предметы и подписи.
+1. Положить Economy JAR в `plugins/` тестового Purpur 26.2 на Java 25.
+2. Перезапустить сервер; проверить `/smeconomy status`, `balance`, `give`, `take`, `verify` и `op`.
+3. Сохранить резервную копию `plugins/ServerMineEconomy/currency.secret` вместе с базой и данными сервера. **Смена или потеря ключа сделает существующие монеты недействительными.**
 
-Права `servermine.economy.admin` и `servermine.cities.admin` по умолчанию выдаются OP.
-Обычных игровых команд Cities нет. Полный ручной сценарий: [server-smoke-test.md](docs/development/server-smoke-test.md).
-Серверный запуск и визуальная проверка в Minecraft не входят в выполненные автоматические проверки.
+База, ключ, playerdata и миры в Git не добавляются.
 
-Файл `plugins/ServerMineEconomy/currency.secret` создаётся при первом запуске. Сохраняйте его вместе с резервной копией Economy: смена ключа лишит существующие монеты подлинности. Секрет и базы исключены из Git.
+## Границы модулей
 
-## Структура и следующий этап
+**Economy отвечает** за подлинность/номиналы физических денег, выдачу/списание, резервирование, журнал операций и Economy API.
 
-- [AGENTS.md](AGENTS.md) — правила работы в репозитории.
-- [ROADMAP.md](ROADMAP.md) — последовательность реализации с критериями готовности.
+**Внешние системы отвечают** за городскую казну, налоги, территории, городские рынки, охотничьи контракты и награды данжей. Они получают API через `ServicesManager`, подключают `economy-api` как `compileOnly`, указывают `depend: [ServerMineEconomy]` и не читают `economy.db`. Междоменная покупка: сохранить operationId, вызвать `reserve`, провести собственную транзакцию и затем `commit` либо `release` при доказанном отказе. `UNKNOWN` сначала сверяется.
+
+## Документация
+
 - [Архитектура](docs/architecture/overview.md), [границы модулей](docs/architecture/module-boundaries.md), [транзакции](docs/architecture/transactions.md).
-- [Концепция Градостроя](docs/gradostroy/concept.md), [прогрессия](docs/gradostroy/progression.md).
-- [Разбор исходных материалов](docs/reference/review.md) — найденные противоречия и внесённые исправления.
-- [Проверки bootstrap](docs/development/validation.md) — результаты сборки и ограничения проверки.
-- [Публикация приватного репозитория](docs/development/github.md).
+- [Технический обзор экономики](docs/reference/economy-readme.md), [схема движка](docs/reference/economy-architecture.md).
+- [Решение о физической валюте](docs/decisions/ADR-001-physical-currency.md), [граница городской казны](docs/decisions/ADR-002-city-treasury-owned-by-cities.md), [сервисы](docs/decisions/ADR-003-servicesmanager-apis.md).
+- [Roadmap](ROADMAP.md), [проверки](docs/development/server-smoke-test.md).
 
-Начинать дальнейшую работу следует с SQLite-хранилища Cities, ревизий, уникального владения чанками и устойчивого журнала операций. После этого подключать основание города и покупку территории через Economy.
-
-Все 73 приложенных файла сохранены в [архиве исходных материалов](docs/reference/source-materials.zip);
-их имена, размеры и SHA-256 перечислены в [манифесте](docs/reference/input-manifest.json).
-Исходные документы в `docs/reference` являются историческими материалами и могут описывать старые команды/пути.
-Актуальные инструкции по запуску находятся в этом README.
+Предыдущая версия репозитория с Градостроем сохранена в ветке `backup/pre-economy-split-2026-10-09`. Git-история не переписана.

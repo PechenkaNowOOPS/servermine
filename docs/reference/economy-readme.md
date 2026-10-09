@@ -110,7 +110,7 @@
 depend: [ServerMineEconomy]
 ```
 
-При локальной разработке положить `servermine-economy-api-0.1.0-SNAPSHOT.jar` в `libs/` потребителя:
+При локальной разработке положить `economy-api-0.1.0-SNAPSHOT.jar` в `libs/` потребителя:
 
 ```kotlin
 dependencies {
@@ -167,12 +167,12 @@ Permission: `servermine.economy.admin`, по умолчанию OP.
 ## Сборка
 
 ```bash
-gradle clean build
+./gradlew clean build
 ```
 
 Финальный серверный JAR будет в:
 
-`economy-plugin/build/libs/ServerMineEconomy-0.1.0-SNAPSHOT.jar`
+`economy/economy-plugin/build/libs/ServerMineEconomy-0.1.0-SNAPSHOT.jar`
 
 Проект намеренно настроен на Java 25 и настоящий Purpur 26.2 API.
 
